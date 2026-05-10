@@ -9,6 +9,7 @@ build/
 *.egg-info/
 docs/
 chat_history.md
+rust/PORTING.md
 release/
 target/
 rust/target/
