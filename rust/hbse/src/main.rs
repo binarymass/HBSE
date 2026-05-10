@@ -15,7 +15,7 @@ use hbse::provider_system::{SystemFingerprintProvider, SYSTEM_FINGERPRINT_PROVID
 use hbse::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
 use hbse::provider_yubikey::YubikeyPivProvider;
 use hbse::records::SecretType;
-use hbse::recovery::RecoveryPackage;
+use hbse::recovery::{generate_mnemonic_phrase, normalize_mnemonic_phrase, RecoveryPackage};
 use hbse::release::{
     generate_release_evidence, generate_signing_keypair, sign_release_artifacts,
     verify_release_evidence,
@@ -142,11 +142,15 @@ enum VaultCommand {
         passphrase: Option<String>,
         #[arg(long)]
         recovery_secret: Option<String>,
+        #[arg(long)]
+        mnemonic: bool,
     },
     Recover {
         package: PathBuf,
         #[arg(long)]
         recovery_secret: Option<String>,
+        #[arg(long)]
+        recovery_mnemonic: Option<String>,
         #[arg(long)]
         new_provider: String,
         #[arg(long)]
@@ -670,33 +674,58 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 destination,
                 passphrase,
                 recovery_secret,
+                mnemonic,
             } => {
                 let passphrase = unlock_passphrase(&vault, passphrase)?;
-                let recovery_secret = recovery_secret_or_env(recovery_secret)?;
+                if mnemonic && recovery_secret.is_some() {
+                    return Err("use either --mnemonic or --recovery-secret, not both".into());
+                }
+                let recovery_secret = if mnemonic {
+                    generate_mnemonic_phrase()
+                } else {
+                    recovery_secret_or_env(recovery_secret)?
+                };
                 let package = vault.create_recovery_package(Some(&passphrase), &recovery_secret)?;
                 package.write(&destination)?;
                 if cli.json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "recovery_id": package.recovery_id,
-                            "vault_id": package.vault_id,
-                            "destination": destination,
-                        }))?
-                    );
+                    let mut output = json!({
+                        "recovery_id": package.recovery_id,
+                        "vault_id": package.vault_id,
+                        "destination": destination,
+                        "recovery_secret_format": if mnemonic { "hbse-mnemonic-v1" } else { "secret" },
+                    });
+                    if mnemonic {
+                        output["recovery_mnemonic"] =
+                            serde_json::Value::String(recovery_secret.clone());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&output)?);
                 } else {
                     println!("recovery package created: {}", destination.display());
+                    if mnemonic {
+                        println!("recovery_mnemonic: {recovery_secret}");
+                        println!("Store this mnemonic separately. It is shown only now.");
+                    }
                 }
             }
             VaultCommand::Recover {
                 package,
                 recovery_secret,
+                recovery_mnemonic,
                 new_provider,
                 new_passphrase,
                 tpm_device,
             } => {
+                if recovery_secret.is_some() && recovery_mnemonic.is_some() {
+                    return Err(
+                        "use either --recovery-secret or --recovery-mnemonic, not both".into(),
+                    );
+                }
                 let package = RecoveryPackage::read(package)?;
-                let recovery_secret = recovery_secret_or_env(recovery_secret)?;
+                let recovery_secret = if let Some(mnemonic) = recovery_mnemonic {
+                    normalize_mnemonic_phrase(&mnemonic)
+                } else {
+                    recovery_secret_or_env(recovery_secret)?
+                };
                 let header = vault.recover_provider_from_package(
                     &package,
                     &recovery_secret,
@@ -1929,9 +1958,17 @@ fn parse_headers(
 fn parse_secret_type(value: &str) -> Result<SecretType, Box<dyn std::error::Error>> {
     match value {
         "api_key" => Ok(SecretType::ApiKey),
+        "access_token" => Ok(SecretType::AccessToken),
+        "refresh_token" => Ok(SecretType::RefreshToken),
         "password" => Ok(SecretType::Password),
+        "passphrase" | "pass_phrase" => Ok(SecretType::Passphrase),
         "token" => Ok(SecretType::Token),
+        "mnemonic" | "mnemonic_phrase" => Ok(SecretType::MnemonicPhrase),
         "ssh_key" => Ok(SecretType::SshKey),
+        "private_key" => Ok(SecretType::PrivateKey),
+        "certificate" | "cert" => Ok(SecretType::Certificate),
+        "credential" => Ok(SecretType::Credential),
+        "json_credential" => Ok(SecretType::JsonCredential),
         "generic" => Ok(SecretType::Generic),
         _ => Err(format!("unsupported secret type: {value}").into()),
     }

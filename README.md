@@ -427,11 +427,29 @@ Create an encrypted recovery package:
 hbse --vault vault.db vault recovery-create --recovery-secret 'store separately' recovery-package.json
 ```
 
+Create a recovery package protected by a generated mnemonic phrase:
+
+```bash
+hbse --vault vault.db vault recovery-create --mnemonic recovery-package.json
+```
+
+The mnemonic is shown once. Store it separately from the recovery package. The mnemonic alone is not enough to recover the vault; it unlocks the recovery package, which can then rewrap the vault root key to a new provider.
+
 Recover and rewrap to a new provider:
 
 ```bash
 hbse --vault recovered.db vault recover \
   --recovery-secret 'store separately' \
+  --new-provider passphrase \
+  --new-passphrase 'new local passphrase' \
+  recovery-package.json
+```
+
+Recover with a mnemonic:
+
+```bash
+hbse --vault recovered.db vault recover \
+  --recovery-mnemonic 'anchor ... zircon' \
   --new-provider passphrase \
   --new-passphrase 'new local passphrase' \
   recovery-package.json
@@ -448,8 +466,12 @@ printf 'secret-value' | hbse --vault vault.db secret put secret://app/api-key --
 Store with an explicit value:
 
 ```bash
-hbse --vault vault.db secret put secret://app/api-key --value 'secret-value'
+hbse --vault vault.db secret put secret://app/api-key \
+  --secret-type api_key \
+  --value 'secret-value'
 ```
+
+Supported secret types are `api_key`, `access_token`, `refresh_token`, `password`, `passphrase`, `token`, `mnemonic_phrase`, `ssh_key`, `private_key`, `certificate`, `credential`, `json_credential`, and `generic`.
 
 List and inspect metadata:
 

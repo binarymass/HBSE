@@ -21,9 +21,17 @@ impl Default for SecretStatus {
 #[serde(rename_all = "snake_case")]
 pub enum SecretType {
     ApiKey,
+    AccessToken,
+    RefreshToken,
     Password,
+    Passphrase,
     Token,
+    MnemonicPhrase,
     SshKey,
+    PrivateKey,
+    Certificate,
+    Credential,
+    JsonCredential,
     Generic,
 }
 
