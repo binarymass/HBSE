@@ -16,7 +16,9 @@ use hbse::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
 use hbse::provider_tpm2_esapi::{LinuxTpm2EsapiProvider, TPM2_ESAPI_PROVIDER_ID};
 use hbse::provider_yubikey::YubikeyPivProvider;
 use hbse::records::SecretType;
-use hbse::recovery::{generate_mnemonic_phrase, normalize_mnemonic_phrase, RecoveryPackage};
+use hbse::recovery::{
+    generate_mnemonic_phrase, normalize_mnemonic_phrase, RecoveryManager, RecoveryPackage,
+};
 use hbse::release::{
     generate_release_evidence, generate_signing_keypair, sign_release_artifacts,
     verify_release_evidence,
@@ -106,6 +108,10 @@ enum Command {
         command: Vec<String>,
     },
     Doctor,
+    Setup {
+        #[arg(long, default_value = "/dev/tpmrm0")]
+        tpm_device: String,
+    },
     Lockdown {
         #[arg(long, default_value = "local lockdown")]
         reason: String,
@@ -145,6 +151,13 @@ enum VaultCommand {
         recovery_secret: Option<String>,
         #[arg(long)]
         mnemonic: bool,
+    },
+    RecoveryInspect {
+        package: PathBuf,
+        #[arg(long)]
+        recovery_secret: Option<String>,
+        #[arg(long)]
+        recovery_mnemonic: Option<String>,
     },
     Recover {
         package: PathBuf,
@@ -713,6 +726,56 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!("recovery_mnemonic: {recovery_secret}");
                         println!("Store this mnemonic separately. It is shown only now.");
                     }
+                }
+            }
+            VaultCommand::RecoveryInspect {
+                package,
+                recovery_secret,
+                recovery_mnemonic,
+            } => {
+                if recovery_secret.is_some() && recovery_mnemonic.is_some() {
+                    return Err(
+                        "use either --recovery-secret or --recovery-mnemonic, not both".into(),
+                    );
+                }
+                let package = RecoveryPackage::read(package)?;
+                let vault_id = vault
+                    .status()
+                    .ok()
+                    .map(|header| header.vault_id)
+                    .unwrap_or_default();
+                let vault_matches = !vault_id.is_empty() && package.vault_id == vault_id;
+                let verification = if let Some(secret) = recovery_mnemonic
+                    .map(|value| normalize_mnemonic_phrase(&value))
+                    .or(recovery_secret)
+                    .or_else(|| env::var("HBSE_RECOVERY_SECRET").ok())
+                {
+                    match RecoveryManager::default().unwrap_root_key(&package, &secret) {
+                        Ok(_) => "verified",
+                        Err(_) => "failed",
+                    }
+                } else {
+                    "not_checked"
+                };
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "format_version": package.format_version,
+                            "recovery_id": package.recovery_id,
+                            "vault_id": package.vault_id,
+                            "created_at": package.created_at,
+                            "vault_matches_current": vault_matches,
+                            "secret_verification": verification,
+                            "warning": package.warning,
+                        }))?
+                    );
+                } else {
+                    println!("recovery_id: {}", package.recovery_id);
+                    println!("vault_id: {}", package.vault_id);
+                    println!("created_at: {}", package.created_at);
+                    println!("vault_matches_current: {vault_matches}");
+                    println!("secret_verification: {verification}");
                 }
             }
             VaultCommand::Recover {
@@ -1808,6 +1871,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = doctor_report(&vault)?;
             print_checks(&report, cli.json)?;
         }
+        Command::Setup { tpm_device } => {
+            let report = setup_report(&vault, &cli.vault, &tpm_device)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_setup_report(&report)?;
+            }
+        }
         Command::Lockdown { reason, passphrase } => {
             let passphrase = unlock_passphrase(&vault, passphrase)?;
             let count = vault.revoke_all_tickets(&passphrase, &reason)?;
@@ -2210,10 +2281,52 @@ fn print_vault_status(
 fn doctor_report(vault: &LocalVault) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut checks = serde_json::Map::new();
     checks.insert("schema".to_string(), json!("ok"));
+    checks.insert(
+        "vault_path".to_string(),
+        json!(vault.store.path().to_string_lossy().to_string()),
+    );
+    checks.insert(
+        "vault_file_exists".to_string(),
+        json!(vault.store.path().exists()),
+    );
+    if let Ok(metadata) = fs::metadata(vault.store.path()) {
+        checks.insert("vault_file_bytes".to_string(), json!(metadata.len()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            checks.insert(
+                "vault_file_mode".to_string(),
+                json!(format!("{:03o}", metadata.permissions().mode() & 0o777)),
+            );
+        }
+    }
+    let default_socket = default_runtime_socket_path();
+    checks.insert(
+        "default_broker_socket".to_string(),
+        json!(default_socket.to_string_lossy().to_string()),
+    );
+    checks.insert(
+        "default_broker_socket_exists".to_string(),
+        json!(default_socket.exists()),
+    );
+    if let Ok(metadata) = fs::metadata(&default_socket) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            checks.insert(
+                "default_broker_socket_mode".to_string(),
+                json!(format!("{:03o}", metadata.permissions().mode() & 0o777)),
+            );
+        }
+    }
     let header = match vault.status() {
         Ok(header) => header,
         Err(hbse::vault::VaultError::Store(hbse::store::StoreError::VaultNotInitialized)) => {
             checks.insert("vault".to_string(), json!("not_initialized"));
+            checks.insert(
+                "provider_catalog".to_string(),
+                json!(sanitized_provider_catalog("/dev/tpmrm0")),
+            );
             return Ok(json!({"checks": checks}));
         }
         Err(err) => return Err(Box::new(err)),
@@ -2239,8 +2352,14 @@ fn doctor_report(vault: &LocalVault) -> Result<serde_json::Value, Box<dyn std::e
         "store_integrity".to_string(),
         json!(vault.store.integrity_check()?),
     );
+    checks.insert("secrets".to_string(), json!(vault.list_secrets()?.len()));
     checks.insert("policies".to_string(), json!(vault.list_policies()?.len()));
-    checks.insert("tickets".to_string(), json!(vault.list_tickets()?.len()));
+    let tickets = vault.list_tickets()?;
+    checks.insert("tickets".to_string(), json!(tickets.len()));
+    checks.insert(
+        "active_tickets".to_string(),
+        json!(tickets.iter().filter(|ticket| !ticket.revoked).count()),
+    );
     checks.insert(
         "audit_events".to_string(),
         json!(vault.list_audit_events()?.len()),
@@ -2259,7 +2378,151 @@ fn doctor_report(vault: &LocalVault) -> Result<serde_json::Value, Box<dyn std::e
         json!(!vault.list_audit_events()?.is_empty()),
     );
     checks.insert("redaction_ready".to_string(), json!(fingerprint_count > 0));
+    let tpm_device = header
+        .provider_binding
+        .get("device_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("/dev/tpmrm0");
+    checks.insert(
+        "provider_catalog".to_string(),
+        json!(sanitized_provider_catalog(tpm_device)),
+    );
     Ok(json!({"checks": checks}))
+}
+
+fn setup_report(
+    vault: &LocalVault,
+    vault_path: &std::path::Path,
+    tpm_device: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let providers = local_provider_catalog(tpm_device);
+    let direct_tpm_available = provider_available(&providers, TPM2_ESAPI_PROVIDER_ID);
+    let tools_tpm_available = provider_available(&providers, TPM2_PROVIDER_ID);
+    let system_fingerprint_available =
+        provider_available(&providers, SYSTEM_FINGERPRINT_PROVIDER_ID);
+    let recommended_provider = if direct_tpm_available {
+        "tpm2-direct"
+    } else if tools_tpm_available {
+        "tpm2"
+    } else if system_fingerprint_available {
+        "system-fingerprint"
+    } else {
+        "passphrase"
+    };
+    let vault_status = match vault.status() {
+        Ok(header) => json!({
+            "initialized": true,
+            "vault_id": header.vault_id,
+            "namespace_id": header.namespace_id,
+            "provider_id": header.provider_binding.get("provider_id").and_then(serde_json::Value::as_str),
+            "assurance_level": header.provider_binding.get("assurance_level").and_then(serde_json::Value::as_str),
+        }),
+        Err(hbse::vault::VaultError::Store(hbse::store::StoreError::VaultNotInitialized)) => {
+            json!({"initialized": false})
+        }
+        Err(err) => return Err(Box::new(err)),
+    };
+    let init_command = match recommended_provider {
+        "passphrase" => format!(
+            "hbse --vault {} vault init --provider passphrase",
+            shell_quote_path(vault_path)
+        ),
+        "system-fingerprint" => format!(
+            "hbse --vault {} vault init --provider system-fingerprint",
+            shell_quote_path(vault_path)
+        ),
+        provider => format!(
+            "hbse --vault {} vault init --provider {provider} --tpm-device {}",
+            shell_quote_path(vault_path),
+            shell_quote(tpm_device)
+        ),
+    };
+    let socket_path = default_runtime_socket_path();
+    let install_service_command = format!(
+        "hbse --vault {} broker install-service --scope user --enable --start",
+        shell_quote_path(vault_path)
+    );
+    Ok(json!({
+        "vault_path": vault_path.to_string_lossy().to_string(),
+        "vault": vault_status,
+        "recommended_provider": recommended_provider,
+        "provider_catalog": sanitized_provider_catalog(tpm_device),
+        "broker": {
+            "default_socket": socket_path.to_string_lossy().to_string(),
+            "default_socket_exists": socket_path.exists(),
+            "user_service_file_exists": user_service_file_exists(),
+        },
+        "commands": {
+            "initialize_vault": init_command,
+            "install_user_broker_service": install_service_command,
+            "check_readiness": format!("hbse --vault {} readiness check --verify-audit", shell_quote_path(vault_path)),
+            "deep_diagnostics": format!("hbse --vault {} doctor", shell_quote_path(vault_path)),
+        },
+    }))
+}
+
+fn provider_available(
+    providers: &[hbse::provider_catalog::ProviderCatalogEntry],
+    id: &str,
+) -> bool {
+    providers
+        .iter()
+        .any(|provider| provider.provider_id == id && provider.available)
+}
+
+fn sanitized_provider_catalog(tpm_device: &str) -> Vec<serde_json::Value> {
+    local_provider_catalog(tpm_device)
+        .into_iter()
+        .map(|provider| {
+            json!({
+                "provider_id": provider.provider_id,
+                "name": provider.name,
+                "assurance_level": provider.assurance_level,
+                "hardware_backed": provider.hardware_backed,
+                "vault_binding_supported": provider.vault_binding_supported,
+                "available": provider.available,
+                "detail": provider.detail,
+                "warning": provider.warning,
+            })
+        })
+        .collect()
+}
+
+fn print_setup_report(report: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "vault_path: {}",
+        printable_json_value(&report["vault_path"])
+    );
+    println!(
+        "vault_initialized: {}",
+        report["vault"]["initialized"].as_bool().unwrap_or(false)
+    );
+    println!(
+        "recommended_provider: {}",
+        printable_json_value(&report["recommended_provider"])
+    );
+    println!("providers:");
+    if let Some(providers) = report["provider_catalog"].as_array() {
+        for provider in providers {
+            println!(
+                "  {} {} {}",
+                printable_json_value(&provider["provider_id"]),
+                if provider["available"].as_bool().unwrap_or(false) {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+                printable_json_value(&provider["detail"]),
+            );
+        }
+    }
+    println!("commands:");
+    if let Some(commands) = report["commands"].as_object() {
+        for (name, command) in commands {
+            println!("  {name}: {}", printable_json_value(command));
+        }
+    }
+    Ok(())
 }
 
 fn readiness_report(
@@ -2418,6 +2681,24 @@ fn print_checks(
     }
     if let Some(checks) = report.get("checks").and_then(serde_json::Value::as_object) {
         for (key, value) in checks {
+            if key == "provider_catalog" {
+                println!("{key}:");
+                if let Some(providers) = value.as_array() {
+                    for provider in providers {
+                        println!(
+                            "  {} {} {}",
+                            printable_json_value(&provider["provider_id"]),
+                            if provider["available"].as_bool().unwrap_or(false) {
+                                "available"
+                            } else {
+                                "unavailable"
+                            },
+                            printable_json_value(&provider["detail"]),
+                        );
+                    }
+                }
+                continue;
+            }
             println!("{key}: {}", printable_json_value(value));
         }
     }
@@ -2438,5 +2719,49 @@ fn default_store_path() -> PathBuf {
     match env::var("HOME") {
         Ok(home) => PathBuf::from(home).join(".local/share/hbse/vault.db"),
         Err(_) => PathBuf::from("vault.db"),
+    }
+}
+
+fn default_runtime_socket_path() -> PathBuf {
+    env::var_os("HBSE_BROKER_SOCKET")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .map(|path| path.join("hbse/broker.sock"))
+        })
+        .unwrap_or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".local/share/hbse/broker.sock")
+        })
+}
+
+fn user_service_file_exists() -> bool {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("systemd/user/hbse-broker.service")
+        .exists()
+}
+
+fn shell_quote_path(path: &std::path::Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }

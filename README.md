@@ -23,6 +23,7 @@ This repository contains:
 - Versioned protobuf contract under `proto/`.
 - Systemd service/socket templates under `packaging/systemd/`.
 - Release evidence commands that generate artifacts into a local release directory.
+- Local security model in `LOCAL_SECURITY_MODEL.md`.
 
 The native local implementation is the primary runtime path. The Python package remains in the repository for API/SDK work and compatibility testing.
 
@@ -57,6 +58,7 @@ HBSE is built around these rules:
 - Passphrase mode works without TPM hardware, but it is not hardware-bound.
 
 See [SECURITY.md](SECURITY.md) before using HBSE with sensitive credentials.
+See [LOCAL_SECURITY_MODEL.md](LOCAL_SECURITY_MODEL.md) for the local threat model and provider tradeoffs.
 
 ## Repository Layout
 
@@ -80,6 +82,13 @@ Install the native binaries for the current user:
 
 ```bash
 rust/install.sh
+```
+
+Get a local setup recommendation:
+
+```bash
+hbse setup
+hbse --json setup
 ```
 
 Install the native binaries and enable the user broker service:
@@ -359,6 +368,16 @@ hbse --vault vault.db provider enroll system-fingerprint
 
 The `tpm2-direct` provider stores the vault root key as a TPM sealed object using native TPM2-TSS ESAPI calls. It requires a Linux TPM resource manager device such as `/dev/tpmrm0` and the system TPM2-TSS libraries. The `tpm2` provider remains available for systems where the direct provider is not usable but `tpm2-tools` works.
 
+## Local Diagnostics
+
+```bash
+hbse setup
+hbse doctor
+hbse readiness check --verify-audit
+```
+
+`setup` recommends the best available local provider and prints commands to initialize the vault and install the broker service. `doctor` reports local vault, provider, broker socket, policy, ticket, audit, and redaction readiness without printing secret values.
+
 ## System Fingerprint Provider
 
 The `system-fingerprint` provider binds the vault root key to stable local machine identifiers such as machine ID and DMI identifiers. It is intended for systems that do not have TPM hardware or an external hardware token, but still want copied-vault resistance beyond passphrase-only storage.
@@ -471,6 +490,13 @@ hbse --vault recovered.db vault recover \
   --new-provider passphrase \
   --new-passphrase 'new local passphrase' \
   recovery-package.json
+```
+
+Inspect a recovery package without exposing the recovered root key:
+
+```bash
+hbse vault recovery-inspect recovery-package.json
+hbse vault recovery-inspect recovery-package.json --recovery-mnemonic 'anchor ... zircon'
 ```
 
 ## Secret Commands

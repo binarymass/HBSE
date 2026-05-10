@@ -6,6 +6,7 @@ Included:
 
 - `README.md`
 - `SECURITY.md`
+- `LOCAL_SECURITY_MODEL.md`
 - `pyproject.toml`
 - `src/hbse/`
 - `tests/`
