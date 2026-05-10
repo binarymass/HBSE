@@ -26,6 +26,7 @@ use hbse::release::{
 use hbse::store::SQLiteVaultStore;
 use hbse::systemd::{install_broker_service, BrokerServiceInstallOptions};
 use hbse::vault::{delivery_mode_string, rotation_state_string, status_string, LocalVault};
+use serde::Serialize;
 use serde_json::json;
 
 #[derive(Debug, Parser)]
@@ -74,6 +75,10 @@ enum Command {
     Provider {
         #[command(subcommand)]
         command: ProviderCommand,
+    },
+    ModelProvider {
+        #[command(subcommand)]
+        command: ModelProviderCommand,
     },
     Mfa {
         #[command(subcommand)]
@@ -505,6 +510,42 @@ enum ProviderCommand {
         new_passphrase: Option<String>,
         #[arg(long, default_value = "/dev/tpmrm0")]
         tpm_device: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelProviderCommand {
+    List,
+    Setup {
+        preset: String,
+        #[arg(long)]
+        api_key_env: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        secret_ref: Option<String>,
+        #[arg(long)]
+        policy_id: Option<String>,
+        #[arg(long)]
+        consumer: Option<String>,
+        #[arg(long, default_value = "model.chat")]
+        purpose: String,
+        #[arg(long, default_value = "model.discovery")]
+        model_discovery_purpose: String,
+        #[arg(long)]
+        upstream_base_url: Option<String>,
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        credential_header: Option<String>,
+        #[arg(long)]
+        credential_prefix: Option<String>,
+        #[arg(long, default_value_t = 10 * 1024 * 1024)]
+        max_body_bytes: u64,
+        #[arg(long)]
+        require_mfa: bool,
+        #[arg(long)]
+        passphrase: Option<String>,
     },
 }
 
@@ -1532,6 +1573,132 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 print_vault_status(&header, cli.json)?;
             }
         },
+        Command::ModelProvider { command } => match command {
+            ModelProviderCommand::List => {
+                let presets = model_provider_presets();
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&presets)?);
+                } else {
+                    for preset in presets {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            preset.id, preset.base_url, preset.credential_header, preset.note
+                        );
+                    }
+                }
+            }
+            ModelProviderCommand::Setup {
+                preset,
+                api_key_env,
+                stdin,
+                secret_ref,
+                policy_id,
+                consumer,
+                purpose,
+                model_discovery_purpose,
+                upstream_base_url,
+                listen,
+                credential_header,
+                credential_prefix,
+                max_body_bytes,
+                require_mfa,
+                passphrase,
+            } => {
+                let preset = model_provider_preset(&preset)
+                    .ok_or_else(|| format!("unknown model provider preset: {preset}"))?;
+                let secret_ref = secret_ref
+                    .unwrap_or_else(|| format!("secret://providers/{}/api-key", preset.id));
+                let policy_id =
+                    policy_id.unwrap_or_else(|| format!("model-provider-{}", preset.id));
+                let consumer =
+                    consumer.unwrap_or_else(|| format!("hbse.http-gateway.{}", preset.id));
+                let base_url = upstream_base_url.unwrap_or_else(|| preset.base_url.to_string());
+                let credential_header =
+                    credential_header.unwrap_or_else(|| preset.credential_header.to_string());
+                let credential_prefix =
+                    credential_prefix.unwrap_or_else(|| preset.credential_prefix.to_string());
+                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let api_key = read_model_provider_key(api_key_env.as_deref(), stdin)?;
+                vault.put_secret(
+                    &secret_ref,
+                    api_key.trim_end_matches(['\r', '\n']).as_bytes(),
+                    &passphrase,
+                    SecretType::ApiKey,
+                )?;
+                let host = http_host_from_base_url(&base_url)?;
+                let path_prefix = http_path_prefix_from_base_url(&base_url);
+                let policy = AccessPolicy {
+                    policy_id: policy_id.clone(),
+                    secret_refs: vec![secret_ref.clone()],
+                    allowed_consumers: vec![consumer.clone()],
+                    denied_consumers: vec![],
+                    allowed_purposes: vec![purpose.clone(), model_discovery_purpose.clone()],
+                    denied_purposes: vec![],
+                    allowed_delivery_modes: vec![DeliveryMode::BrokeredHttp],
+                    allowed_http_hosts: vec![host],
+                    denied_http_hosts: vec![],
+                    allowed_http_methods: vec![
+                        "GET".to_string(),
+                        "POST".to_string(),
+                        "DELETE".to_string(),
+                    ],
+                    denied_http_methods: vec![],
+                    allowed_http_path_prefixes: vec![path_prefix],
+                    denied_http_path_prefixes: vec![],
+                    require_https_for_brokered_http: base_url.starts_with("https://"),
+                    max_http_request_body_bytes: Some(max_body_bytes),
+                    allowed_os_uids: vec![],
+                    denied_os_uids: vec![],
+                    allowed_executable_paths: vec![],
+                    denied_executable_paths: vec![],
+                    allowed_executable_sha256: vec![],
+                    denied_executable_sha256: vec![],
+                    exportable: false,
+                    max_ticket_ttl_seconds: 60,
+                    max_uses: 1,
+                    minimum_provider_assurance: "A1".to_string(),
+                    require_mfa,
+                    expires_at: None,
+                };
+                vault.save_policy(policy, &passphrase)?;
+                let listen = listen.unwrap_or_else(|| "127.0.0.1:8787".to_string());
+                let gateway_command = model_provider_gateway_command(
+                    &base_url,
+                    &secret_ref,
+                    &consumer,
+                    &purpose,
+                    &model_discovery_purpose,
+                    &credential_header,
+                    &credential_prefix,
+                    &listen,
+                );
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "provider": preset.id,
+                            "secret_ref": secret_ref,
+                            "policy_id": policy_id,
+                            "consumer": consumer,
+                            "upstream_base_url": base_url,
+                            "local_base_url": format!("http://{listen}/v1"),
+                            "gateway_command": gateway_command,
+                        }))?
+                    );
+                } else {
+                    println!("model provider configured: {}", preset.id);
+                    println!("secret_ref: {secret_ref}");
+                    println!("policy_id: {policy_id}");
+                    println!("consumer: {consumer}");
+                    println!("local_base_url: http://{listen}/v1");
+                    println!("gateway command:");
+                    println!("{gateway_command}");
+                    println!("set unmodified OpenAI-compatible clients to:");
+                    println!("OPENAI_BASE_URL=http://{listen}/v1");
+                    println!("OPENAI_API_KEY=hbse-placeholder");
+                }
+            }
+        },
         Command::Mfa { command } => match command {
             MfaCommand::EnrollTotp {
                 issuer,
@@ -2162,6 +2329,189 @@ fn require_plaintext_export_confirmation(
     } else {
         Err("plaintext export requires --allow-plaintext; prefer hbse run, hbse dotenv run, or broker provider-http when possible".into())
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelProviderPreset {
+    id: &'static str,
+    display_name: &'static str,
+    base_url: &'static str,
+    credential_header: &'static str,
+    credential_prefix: &'static str,
+    note: &'static str,
+}
+
+fn model_provider_presets() -> Vec<ModelProviderPreset> {
+    vec![
+        ModelProviderPreset {
+            id: "openai",
+            display_name: "OpenAI",
+            base_url: "https://api.openai.com/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "xai",
+            display_name: "xAI",
+            base_url: "https://api.x.ai/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "openrouter",
+            display_name: "OpenRouter",
+            base_url: "https://openrouter.ai/api/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "groq",
+            display_name: "Groq",
+            base_url: "https://api.groq.com/openai/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "mistral",
+            display_name: "Mistral AI",
+            base_url: "https://api.mistral.ai/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "deepseek",
+            display_name: "DeepSeek",
+            base_url: "https://api.deepseek.com/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "together",
+            display_name: "Together AI",
+            base_url: "https://api.together.xyz/v1",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible",
+        },
+        ModelProviderPreset {
+            id: "perplexity",
+            display_name: "Perplexity",
+            base_url: "https://api.perplexity.ai",
+            credential_header: "Authorization",
+            credential_prefix: "Bearer ",
+            note: "OpenAI-compatible chat endpoint",
+        },
+        ModelProviderPreset {
+            id: "azure-openai",
+            display_name: "Azure OpenAI",
+            base_url: "https://example.openai.azure.com/openai",
+            credential_header: "api-key",
+            credential_prefix: "",
+            note: "override --upstream-base-url for your Azure resource/deployment/API version",
+        },
+        ModelProviderPreset {
+            id: "anthropic",
+            display_name: "Anthropic",
+            base_url: "https://api.anthropic.com/v1",
+            credential_header: "x-api-key",
+            credential_prefix: "",
+            note: "not OpenAI-compatible; use provider-http or a protocol adapter",
+        },
+        ModelProviderPreset {
+            id: "amazon-bedrock",
+            display_name: "Amazon Bedrock",
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com",
+            credential_header: "Authorization",
+            credential_prefix: "",
+            note: "not OpenAI-compatible; AWS SigV4 support requires a protocol adapter",
+        },
+    ]
+}
+
+fn model_provider_preset(id: &str) -> Option<ModelProviderPreset> {
+    model_provider_presets()
+        .into_iter()
+        .find(|preset| preset.id == id)
+}
+
+fn read_model_provider_key(
+    api_key_env: Option<&str>,
+    stdin: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if stdin {
+        let mut value = String::new();
+        io::stdin().read_to_string(&mut value)?;
+        if value.trim().is_empty() {
+            return Err("stdin did not contain an API key".into());
+        }
+        return Ok(value);
+    }
+    if let Some(name) = api_key_env {
+        let value =
+            env::var(name).map_err(|_| format!("environment variable {name} is not set"))?;
+        if value.trim().is_empty() {
+            return Err(format!("environment variable {name} is empty").into());
+        }
+        return Ok(value);
+    }
+    Err("provide the provider key with --api-key-env NAME or --stdin".into())
+}
+
+fn http_host_from_base_url(base_url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let without_scheme = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .ok_or("upstream base URL must start with http:// or https://")?;
+    let host = without_scheme
+        .split('/')
+        .next()
+        .ok_or("upstream base URL must include a host")?;
+    if host.is_empty() {
+        return Err("upstream base URL must include a host".into());
+    }
+    Ok(host.to_string())
+}
+
+fn http_path_prefix_from_base_url(base_url: &str) -> String {
+    let without_scheme = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .unwrap_or(base_url);
+    let mut parts = without_scheme.splitn(2, '/');
+    let _host = parts.next();
+    let path = parts.next().unwrap_or("");
+    if path.is_empty() {
+        "/v1/".to_string()
+    } else {
+        format!("/{}/", path.trim_matches('/'))
+    }
+}
+
+fn model_provider_gateway_command(
+    base_url: &str,
+    secret_ref: &str,
+    consumer: &str,
+    purpose: &str,
+    model_discovery_purpose: &str,
+    credential_header: &str,
+    credential_prefix: &str,
+    listen: &str,
+) -> String {
+    format!(
+        "hbse-broker --vault \"$HOME/.local/share/hbse/vault.db\" --socket \"$XDG_RUNTIME_DIR/hbse/broker.sock\" --idle-timeout-seconds 900 --http-listen {listen} --http-upstream-base-url {base_url} --http-secret-ref {secret_ref} --http-consumer {consumer} --http-purpose {purpose} --http-model-discovery-purpose {model_discovery_purpose} --http-credential-header '{}' --http-credential-prefix '{}'",
+        shell_single_quote(credential_header),
+        shell_single_quote(credential_prefix)
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 fn plaintext_export_passphrase(

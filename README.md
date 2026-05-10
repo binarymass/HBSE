@@ -857,6 +857,19 @@ export OPENAI_API_KEY=hbse-placeholder
 
 The placeholder API key is ignored by HBSE. The gateway strips client `Authorization`, asks the unlocked broker to perform `provider_http`, injects the real credential only into the upstream request, and returns the upstream response. Policies must allow `brokered_http` for the configured consumer, purpose, host, method, and path. The gateway is intended for local loopback use; bind it to `127.0.0.1`, not a public interface.
 
+HBSE can generate this provider setup for common model providers:
+
+```bash
+hbse model-provider list
+export OPENAI_API_KEY=sk-...
+hbse model-provider setup openai \
+  --api-key-env OPENAI_API_KEY \
+  --passphrase 'vault-passphrase' \
+  --listen 127.0.0.1:8787
+```
+
+`model-provider setup` stores the provider credential in the vault, creates a non-exportable `brokered_http` policy, and prints the matching `hbse-broker --http-listen ...` command plus the local OpenAI-compatible base URL. Built-in presets include `openai`, `xai`, `openrouter`, `groq`, `mistral`, `deepseek`, `together`, `perplexity`, `azure-openai`, `anthropic`, and `amazon-bedrock`. The HTTP gateway is directly useful for OpenAI-compatible providers; Anthropic, Amazon Bedrock, and some Azure deployments need protocol-specific adapters or `--upstream-base-url`/header overrides.
+
 Lock the broker:
 
 ```bash
