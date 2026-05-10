@@ -775,6 +775,8 @@ hbse broker mfa-verify --socket /tmp/hbse.sock 123456
 hbse broker status --socket /tmp/hbse.sock
 ```
 
+When `--socket` is omitted, broker commands use `HBSE_BROKER_SOCKET`, then `$XDG_RUNTIME_DIR/hbse/broker.sock`, then `$HOME/.local/share/hbse/broker.sock`.
+
 You can also supply the MFA code during unlock:
 
 ```bash
@@ -814,6 +816,13 @@ Lock the broker:
 
 ```bash
 hbse broker lock --socket /tmp/hbse.sock
+```
+
+Remove a stale socket left behind by a broker process that is no longer reachable:
+
+```bash
+hbse broker cleanup-socket
+hbse broker cleanup-socket --socket /tmp/hbse.sock
 ```
 
 The broker captures local peer identity such as PID, UID, GID, executable path, executable hash, and command name on supported Linux systems. Policies can use this context to restrict access.
@@ -996,7 +1005,8 @@ Then verify permissions for the TPM resource manager device. The direct provider
 Start `hbse-broker`, verify the socket path, then run:
 
 ```bash
-hbse broker status --socket /path/to/hbse.sock
+hbse broker status
+hbse broker cleanup-socket
 ```
 
 `audit verification failed`

@@ -471,11 +471,11 @@ enum MfaCommand {
 #[derive(Debug, Subcommand)]
 enum BrokerCommand {
     Status {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
     },
     Unlock {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
         #[arg(long)]
         passphrase: Option<String>,
@@ -483,16 +483,16 @@ enum BrokerCommand {
         mfa_code: Option<String>,
     },
     MfaVerify {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
         code: String,
     },
     Lock {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
     },
     Checkout {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
         #[arg(long)]
         secret_ref: String,
@@ -504,7 +504,7 @@ enum BrokerCommand {
         delivery_mode: String,
     },
     Materialize {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
         #[arg(long)]
         secret_ref: String,
@@ -518,7 +518,7 @@ enum BrokerCommand {
         raw_export_requested: bool,
     },
     ProviderHttp {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
         socket: PathBuf,
         #[arg(long)]
         secret_ref: String,
@@ -542,6 +542,10 @@ enum BrokerCommand {
         timeout_seconds: f64,
         #[arg(long, default_value_t = 10 * 1024 * 1024)]
         max_response_bytes: u64,
+    },
+    CleanupSocket {
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
+        socket: PathBuf,
     },
     InstallService {
         #[arg(long, default_value = "user")]
@@ -1568,6 +1572,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                 )?)?;
             }
+            BrokerCommand::CleanupSocket { socket } => {
+                let result = cleanup_broker_socket(&socket)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!(
+                        "{}",
+                        result["detail"].as_str().unwrap_or("broker socket checked")
+                    );
+                }
+            }
             BrokerCommand::InstallService {
                 scope,
                 unit_dir,
@@ -2319,6 +2334,10 @@ fn doctor_report(vault: &LocalVault) -> Result<serde_json::Value, Box<dyn std::e
             );
         }
     }
+    checks.insert(
+        "default_broker_socket_status".to_string(),
+        broker_socket_report(&default_socket),
+    );
     let header = match vault.status() {
         Ok(header) => header,
         Err(hbse::vault::VaultError::Store(hbse::store::StoreError::VaultNotInitialized)) => {
@@ -2438,6 +2457,7 @@ fn setup_report(
         ),
     };
     let socket_path = default_runtime_socket_path();
+    let broker_status = broker_socket_report(&socket_path);
     let install_service_command = format!(
         "hbse --vault {} broker install-service --scope user --enable --start",
         shell_quote_path(vault_path)
@@ -2450,6 +2470,8 @@ fn setup_report(
         "broker": {
             "default_socket": socket_path.to_string_lossy().to_string(),
             "default_socket_exists": socket_path.exists(),
+            "default_socket_reachable": broker_status.get("reachable").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "default_socket_detail": broker_status.get("detail").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
             "user_service_file_exists": user_service_file_exists(),
         },
         "commands": {
@@ -2458,6 +2480,87 @@ fn setup_report(
             "check_readiness": format!("hbse --vault {} readiness check --verify-audit", shell_quote_path(vault_path)),
             "deep_diagnostics": format!("hbse --vault {} doctor", shell_quote_path(vault_path)),
         },
+    }))
+}
+
+fn broker_socket_report(socket: &std::path::Path) -> serde_json::Value {
+    let mut report = serde_json::Map::new();
+    report.insert(
+        "path".to_string(),
+        json!(socket.to_string_lossy().to_string()),
+    );
+    report.insert("exists".to_string(), json!(socket.exists()));
+    if let Ok(metadata) = fs::metadata(socket) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            report.insert(
+                "mode".to_string(),
+                json!(format!("{:03o}", metadata.permissions().mode() & 0o777)),
+            );
+        }
+    }
+    match broker_daemon::request(socket, &json!({"command": "status"})) {
+        Ok(status) => {
+            report.insert("reachable".to_string(), json!(true));
+            report.insert("detail".to_string(), json!("broker reachable"));
+            report.insert(
+                "unlocked".to_string(),
+                json!(status
+                    .get("unlocked")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)),
+            );
+            report.insert(
+                "mfa_verified".to_string(),
+                json!(status
+                    .get("mfa_verified")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)),
+            );
+        }
+        Err(err) => {
+            report.insert("reachable".to_string(), json!(false));
+            report.insert("detail".to_string(), json!(err.to_string()));
+        }
+    }
+    serde_json::Value::Object(report)
+}
+
+fn cleanup_broker_socket(
+    socket: &std::path::Path,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if !socket.exists() {
+        return Ok(json!({
+            "socket": socket.to_string_lossy().to_string(),
+            "removed": false,
+            "detail": "broker socket does not exist",
+        }));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let metadata = fs::metadata(socket)?;
+        if !metadata.file_type().is_socket() {
+            return Ok(json!({
+                "socket": socket.to_string_lossy().to_string(),
+                "removed": false,
+                "detail": "path exists but is not a Unix socket; refusing to remove it",
+            }));
+        }
+    }
+    if broker_daemon::request(socket, &json!({"command": "status"})).is_ok() {
+        return Ok(json!({
+            "socket": socket.to_string_lossy().to_string(),
+            "removed": false,
+            "detail": "broker is reachable; socket was not removed",
+        }));
+    }
+    fs::remove_file(socket)?;
+    Ok(json!({
+        "socket": socket.to_string_lossy().to_string(),
+        "removed": true,
+        "detail": "removed stale broker socket",
     }))
 }
 
