@@ -14,6 +14,7 @@ This repository contains:
 - Native Rust broker daemon: `hbse-broker`.
 - Python package with CLI, broker daemon, SDK modules, and REST API code.
 - Linux TPM2 provider support through `tpm2-tools`.
+- System fingerprint provider support for machines without TPM hardware.
 - Passphrase provider fallback for systems without TPM hardware.
 - SQLite-backed encrypted local vault storage.
 - Policy, ticket, audit, backup, recovery, rotation, dotenv, release, readiness, and systemd support.
@@ -27,7 +28,7 @@ The native local implementation is the primary runtime path. The Python package 
 
 - Encrypted local vault storage.
 - Per-secret random data encryption keys.
-- Vault root key protection by TPM2 or passphrase.
+- Vault root key protection by TPM2, system fingerprint, or passphrase.
 - Policy-controlled secret access by consumer, purpose, and delivery mode.
 - Short-lived Secret Access Tickets.
 - Local broker daemon for same-machine tools and services.
@@ -331,7 +332,39 @@ Provider enrollment and rewrap:
 ```bash
 hbse --vault vault.db provider enroll passphrase --new-passphrase 'new local passphrase'
 hbse --vault vault.db provider enroll tpm2 --tpm-device /dev/tpmrm0
+hbse --vault vault.db provider enroll system-fingerprint
 ```
+
+## System Fingerprint Provider
+
+The `system-fingerprint` provider binds the vault root key to stable local machine identifiers such as machine ID and DMI identifiers. It is intended for systems that do not have TPM hardware or an external hardware token, but still want copied-vault resistance beyond passphrase-only storage.
+
+This provider is not a hardware security boundary. A privileged local attacker may be able to read or clone the same identifiers. It is assigned A1 assurance and should be treated as stronger than standalone passphrase ergonomically, but weaker than TPM-backed binding.
+
+Check availability:
+
+```bash
+hbse provider test-system-fingerprint
+```
+
+Initialize a system-fingerprint-bound vault:
+
+```bash
+hbse --vault vault.db vault init --provider system-fingerprint
+```
+
+Recover or rewrap to this provider:
+
+```bash
+hbse --vault vault.db provider enroll system-fingerprint
+
+hbse --vault recovered.db vault recover \
+  --recovery-secret 'store separately' \
+  --new-provider system-fingerprint \
+  recovery-package.json
+```
+
+Because this binding depends on local system identity, motherboard replacement, VM cloning, OS machine-ID changes, or hardware inventory changes can prevent unlock. Keep a separate recovery package.
 
 ## Vault Commands
 
@@ -340,6 +373,7 @@ Initialize:
 ```bash
 hbse --vault vault.db vault init --provider passphrase
 hbse --vault vault.db vault init --provider tpm2 --tpm-device /dev/tpmrm0
+hbse --vault vault.db vault init --provider system-fingerprint
 ```
 
 Status:
@@ -851,4 +885,4 @@ rust/package-local.sh 0.1.0
 
 HBSE should not be represented as production-grade for high-sensitivity or external deployment until the appropriate production assurance gates pass and the release artifacts are verified.
 
-Current local functionality includes encrypted vault storage, passphrase and TPM2 providers, local broker facilitation, dotenv reference workflows, policy-controlled command execution, audit verification, backup/recovery, rotation, systemd installation, and release evidence/signing. Remaining higher-assurance work includes broader cross-platform provider support, production gRPC serving, signed provider profiles, parser-aware redaction expansion, and external security review.
+Current local functionality includes encrypted vault storage, passphrase, system fingerprint, and TPM2 providers, local broker facilitation, dotenv reference workflows, policy-controlled command execution, audit verification, backup/recovery, rotation, systemd installation, and release evidence/signing. Remaining higher-assurance work includes external hardware-token providers such as YubiKey/PIV, broader cross-platform provider support, production gRPC serving, signed provider profiles, parser-aware redaction expansion, and external security review.

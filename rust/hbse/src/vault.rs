@@ -12,6 +12,10 @@ use crate::policy::{AccessPolicy, AccessRequest, PolicyDecision, PolicyEngine};
 use crate::provider::{
     PassphraseProvider, PassphraseProviderBinding, ProviderError, PASSPHRASE_PROVIDER_ID,
 };
+use crate::provider_system::{
+    SystemFingerprintProvider, SystemFingerprintProviderBinding, SystemFingerprintProviderError,
+    SYSTEM_FINGERPRINT_PROVIDER_ID,
+};
 use crate::provider_tpm2::{
     LinuxTpm2ToolsProvider, Tpm2ProviderBinding, Tpm2ProviderError, TPM2_PROVIDER_ID,
 };
@@ -35,6 +39,8 @@ pub enum VaultError {
     Provider(#[from] ProviderError),
     #[error("{0}")]
     Tpm2Provider(#[from] Tpm2ProviderError),
+    #[error("{0}")]
+    SystemFingerprintProvider(#[from] SystemFingerprintProviderError),
     #[error("{0}")]
     Recovery(#[from] RecoveryError),
     #[error("{0}")]
@@ -160,6 +166,37 @@ impl LocalVault {
         Ok(header)
     }
 
+    pub fn init_system_fingerprint(
+        &self,
+        namespace_id: impl Into<String>,
+    ) -> Result<VaultHeader, VaultError> {
+        let vault_id = Uuid::new_v4().to_string();
+        let namespace_id = namespace_id.into();
+        let root_key: [u8; KEY_SIZE] = random();
+        let binding = SystemFingerprintProvider::default().wrap_root_key(&vault_id, &root_key)?;
+        let header = VaultHeader {
+            schema_version: crate::store::SCHEMA_VERSION,
+            vault_id: vault_id.clone(),
+            namespace_id,
+            provider_binding: serde_json::to_value(binding)?,
+            created_at: utc_millis(Utc::now()),
+        };
+        self.store.create_vault(&header)?;
+        let keys = KeyHierarchy::new(vault_id, &root_key)?;
+        self.append_audit(
+            &header,
+            &keys,
+            "vault.initialized",
+            "info",
+            "allow",
+            map_from_json(json!({
+                "provider_id": header.provider_binding.get("provider_id").and_then(|value| value.as_str()),
+                "assurance_level": header.provider_binding.get("assurance_level").and_then(|value| value.as_str()),
+            })),
+        )?;
+        Ok(header)
+    }
+
     pub fn status(&self) -> Result<VaultHeader, VaultError> {
         Ok(self.store.load_header()?)
     }
@@ -183,6 +220,10 @@ impl LocalVault {
             }
             "tpm2" => serde_json::to_value(
                 LinuxTpm2ToolsProvider::new(tpm_device)
+                    .wrap_root_key(&header.vault_id, keys.root_key_bytes())?,
+            )?,
+            "system-fingerprint" => serde_json::to_value(
+                SystemFingerprintProvider::default()
                     .wrap_root_key(&header.vault_id, keys.root_key_bytes())?,
             )?,
             _ => return Err(VaultError::UnsupportedProvider(new_provider.to_string())),
@@ -257,6 +298,9 @@ impl LocalVault {
             "tpm2" => serde_json::to_value(
                 LinuxTpm2ToolsProvider::new(tpm_device)
                     .wrap_root_key(&header.vault_id, &root_key)?,
+            )?,
+            "system-fingerprint" => serde_json::to_value(
+                SystemFingerprintProvider::default().wrap_root_key(&header.vault_id, &root_key)?,
             )?,
             _ => return Err(VaultError::UnsupportedProvider(new_provider.to_string())),
         };
@@ -816,6 +860,10 @@ impl LocalVault {
                 serde_json::from_value(header.provider_binding.clone())?;
             self.provider
                 .unwrap_root_key(&header.vault_id, &binding, passphrase)?
+        } else if provider_id == SYSTEM_FINGERPRINT_PROVIDER_ID {
+            let binding: SystemFingerprintProviderBinding =
+                serde_json::from_value(header.provider_binding.clone())?;
+            SystemFingerprintProvider::default().unwrap_root_key(&header.vault_id, &binding)?
         } else {
             return Err(VaultError::UnsupportedProvider(provider_id.to_string()));
         };

@@ -6,6 +6,7 @@ pub mod dotenv;
 pub mod keys;
 pub mod policy;
 pub mod provider;
+pub mod provider_system;
 pub mod provider_tpm2;
 pub mod records;
 pub mod recovery;

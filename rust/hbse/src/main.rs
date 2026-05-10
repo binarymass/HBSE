@@ -10,6 +10,7 @@ use hbse::broker_daemon;
 use hbse::dotenv::{parse_dotenv, scan_dotenv, split_dotenv_values};
 use hbse::policy::{AccessPolicy, AccessRequest, DeliveryMode};
 use hbse::provider::PASSPHRASE_PROVIDER_ID;
+use hbse::provider_system::{SystemFingerprintProvider, SYSTEM_FINGERPRINT_PROVIDER_ID};
 use hbse::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
 use hbse::records::SecretType;
 use hbse::recovery::RecoveryPackage;
@@ -352,6 +353,7 @@ enum ProviderCommand {
         #[arg(long, default_value = "/dev/tpmrm0")]
         device: String,
     },
+    TestSystemFingerprint,
     Enroll {
         provider: String,
         #[arg(long)]
@@ -550,6 +552,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         vault.init_passphrase(&passphrase, namespace)?
                     }
                     "tpm2" => vault.init_tpm2(namespace, &tpm_device)?,
+                    "system-fingerprint" => vault.init_system_fingerprint(namespace)?,
                     _ => return Err(format!("unsupported provider: {provider}").into()),
                 };
                 print_vault_status(&header, cli.json)?;
@@ -1077,6 +1080,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(4);
                 }
             }
+            ProviderCommand::TestSystemFingerprint => {
+                let status = SystemFingerprintProvider::default().detect();
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    println!("{}", status.detail);
+                }
+                if !status.available {
+                    std::process::exit(4);
+                }
+            }
             ProviderCommand::Enroll {
                 provider,
                 current_passphrase,
@@ -1584,6 +1598,9 @@ fn unlock_passphrase(
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     if provider_id == TPM2_PROVIDER_ID {
+        return Ok(String::new());
+    }
+    if provider_id == SYSTEM_FINGERPRINT_PROVIDER_ID {
         return Ok(String::new());
     }
     if provider_id == PASSPHRASE_PROVIDER_ID {
