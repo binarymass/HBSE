@@ -10,6 +10,7 @@ use hbse::broker_daemon;
 use hbse::dotenv::{parse_dotenv, scan_dotenv, split_dotenv_values};
 use hbse::policy::{AccessPolicy, AccessRequest, DeliveryMode};
 use hbse::provider::PASSPHRASE_PROVIDER_ID;
+use hbse::provider_catalog::local_provider_catalog;
 use hbse::provider_system::{SystemFingerprintProvider, SYSTEM_FINGERPRINT_PROVIDER_ID};
 use hbse::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
 use hbse::provider_yubikey::YubikeyPivProvider;
@@ -346,6 +347,10 @@ enum RotationCommand {
 
 #[derive(Debug, Subcommand)]
 enum ProviderCommand {
+    List {
+        #[arg(long, default_value = "/dev/tpmrm0")]
+        device: String,
+    },
     Detect {
         #[arg(long, default_value = "/dev/tpmrm0")]
         device: String,
@@ -1060,6 +1065,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Provider { command } => match command {
+            ProviderCommand::List { device } => {
+                let providers = local_provider_catalog(&device);
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&providers)?);
+                } else {
+                    for provider in providers {
+                        let binding = if provider.vault_binding_supported {
+                            "vault-binding"
+                        } else {
+                            "detect-only"
+                        };
+                        let availability = if provider.available {
+                            "available"
+                        } else {
+                            "unavailable"
+                        };
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            provider.provider_id,
+                            provider.assurance_level,
+                            binding,
+                            availability,
+                            provider.detail
+                        );
+                    }
+                }
+            }
             ProviderCommand::Detect { device } => {
                 let status = LinuxTpm2ToolsProvider::new(device).detect();
                 if cli.json {

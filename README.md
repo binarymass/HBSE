@@ -325,8 +325,12 @@ hbse --vault vault.db vault init --provider passphrase
 Provider detection:
 
 ```bash
+hbse provider list
+hbse --json provider list
 hbse provider detect
 ```
+
+`provider list` inventories the local provider surface. It reports whether each provider is available, whether it supports vault binding today, and whether it is hardware-backed. `provider detect` is retained as the TPM2-specific compatibility check.
 
 Provider enrollment and rewrap:
 
