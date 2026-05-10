@@ -37,6 +37,7 @@ use crate::tickets::{policy_hash, SecretAccessTicket, TicketManager, TicketValid
 pub const DEFAULT_POLICY_ID: &str = "default-deny";
 pub const DEFAULT_POLICY_HASH: &str = "mvp-default-deny-policy";
 pub const DEFAULT_PROVIDER_POLICY_HASH: &str = "unbound-provider-policy";
+pub const PLAINTEXT_EXPORT_CONFIG_KEY: &str = "config.plaintext_export";
 
 #[derive(Debug, Error)]
 pub enum VaultError {
@@ -88,6 +89,10 @@ pub enum VaultError {
     MfaNotEnrolled,
     #[error("invalid TOTP MFA code")]
     MfaInvalidCode,
+    #[error("plaintext export is disabled by local vault config")]
+    PlaintextExportDisabled,
+    #[error("plaintext export requires verified TOTP MFA")]
+    PlaintextExportMfaRequired,
     #[error("ticket policy is no longer active or compatible")]
     TicketPolicyChanged,
     #[error("ticket is bound to a stale secret version")]
@@ -251,6 +256,51 @@ impl LocalVault {
 
     pub fn status(&self) -> Result<VaultHeader, VaultError> {
         Ok(self.store.load_header()?)
+    }
+
+    pub fn plaintext_export_enabled(&self) -> Result<bool, VaultError> {
+        Ok(self
+            .store
+            .get_metadata(PLAINTEXT_EXPORT_CONFIG_KEY)?
+            .as_deref()
+            == Some("enabled"))
+    }
+
+    pub fn set_plaintext_export_enabled(
+        &self,
+        passphrase: &str,
+        enabled: bool,
+    ) -> Result<(), VaultError> {
+        let (header, keys) = self.unlock(Some(passphrase))?;
+        self.store.set_metadata(
+            PLAINTEXT_EXPORT_CONFIG_KEY,
+            if enabled { "enabled" } else { "disabled" },
+        )?;
+        self.append_audit(
+            &header,
+            &keys,
+            if enabled {
+                "config.plaintext_export_enabled"
+            } else {
+                "config.plaintext_export_disabled"
+            },
+            "critical",
+            "allow",
+            map_from_json(json!({
+                "plaintext_export_enabled": enabled,
+            })),
+        )?;
+        Ok(())
+    }
+
+    pub fn enforce_plaintext_export_allowed(&self, mfa_verified: bool) -> Result<(), VaultError> {
+        if !self.plaintext_export_enabled()? {
+            return Err(VaultError::PlaintextExportDisabled);
+        }
+        if self.totp_mfa_enrolled()? && !mfa_verified {
+            return Err(VaultError::PlaintextExportMfaRequired);
+        }
+        Ok(())
     }
 
     pub fn rewrap_provider(
@@ -788,6 +838,9 @@ impl LocalVault {
         request: AccessRequest,
         passphrase: &str,
     ) -> Result<Vec<u8>, VaultError> {
+        if request.raw_export_requested {
+            self.enforce_plaintext_export_allowed(request.mfa_verified)?;
+        }
         let (header, keys) = self.unlock(Some(passphrase))?;
         let ticket = self
             .store
@@ -1264,6 +1317,38 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_export_is_disabled_by_default_and_requires_mfa_when_enrolled() {
+        let dir = tempdir().unwrap();
+        let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
+        vault.init("passphrase", "default").unwrap();
+
+        assert!(!vault.plaintext_export_enabled().unwrap());
+        assert!(matches!(
+            vault.enforce_plaintext_export_allowed(false),
+            Err(VaultError::PlaintextExportDisabled)
+        ));
+
+        vault
+            .set_plaintext_export_enabled("passphrase", true)
+            .unwrap();
+        assert!(vault.plaintext_export_enabled().unwrap());
+        vault
+            .enforce_plaintext_export_allowed(false)
+            .expect("plaintext export allowed before MFA enrollment");
+
+        vault
+            .enroll_totp_mfa("passphrase", "HBSE", "test@example.local")
+            .unwrap();
+        assert!(matches!(
+            vault.enforce_plaintext_export_allowed(false),
+            Err(VaultError::PlaintextExportMfaRequired)
+        ));
+        vault
+            .enforce_plaintext_export_allowed(true)
+            .expect("verified MFA permits configured plaintext export");
+    }
+
+    #[test]
     fn disabled_secret_is_not_materialized() {
         let dir = tempdir().unwrap();
         let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
@@ -1364,6 +1449,9 @@ mod tests {
         let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
         vault.init("passphrase", "default").unwrap();
         vault
+            .set_plaintext_export_enabled("passphrase", true)
+            .unwrap();
+        vault
             .put_secret(
                 "secret://service/api",
                 b"old-secret",
@@ -1431,6 +1519,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
         vault.init("passphrase", "default").unwrap();
+        vault
+            .set_plaintext_export_enabled("passphrase", true)
+            .unwrap();
         vault
             .put_secret(
                 "secret://service/api",

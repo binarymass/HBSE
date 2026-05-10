@@ -527,11 +527,18 @@ hbse --vault vault.db secret inspect secret://app/api-key
 Resolve a `secret://` reference in a terminal:
 
 ```bash
+hbse config plaintext-export enable
 hbse --vault vault.db resolve --allow-plaintext secret://app/api-key
 hbse resolve --broker --allow-plaintext --purpose provider-call secret://app/api-key
 ```
 
-Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require `--allow-plaintext`; broker-backed resolution also requires policy export permission.
+Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require local plaintext export to be enabled, require `--allow-plaintext`, and require a TOTP code when MFA is enrolled. Broker-backed resolution also requires policy export permission.
+
+Disable plaintext export when it is not actively needed:
+
+```bash
+hbse config plaintext-export disable
+```
 
 Disable a secret:
 
@@ -547,7 +554,7 @@ hbse --vault vault.db secret destroy \
   secret://app/api-key
 ```
 
-Raw secret retrieval is intentionally constrained. `hbse secret get` and `hbse resolve` require `--allow-plaintext`. Prefer `hbse run`, broker materialization, or provider HTTP instead of printing raw secrets.
+Raw secret retrieval is intentionally constrained. `hbse secret get` and `hbse resolve` require `hbse config plaintext-export enable` and `--allow-plaintext`. Prefer `hbse run`, broker materialization, or provider HTTP instead of printing raw secrets.
 
 ## Policy Commands
 

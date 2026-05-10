@@ -59,6 +59,10 @@ enum Command {
         #[command(subcommand)]
         command: PolicyCommand,
     },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Ticket {
         #[command(subcommand)]
         command: TicketCommand,
@@ -123,6 +127,8 @@ enum Command {
         delivery_mode: String,
         #[arg(long)]
         allow_plaintext: bool,
+        #[arg(long)]
+        mfa_code: Option<String>,
     },
     Doctor,
     Setup {
@@ -210,6 +216,8 @@ enum SecretCommand {
         passphrase: Option<String>,
         #[arg(long)]
         allow_plaintext: bool,
+        #[arg(long)]
+        mfa_code: Option<String>,
     },
     Inspect {
         secret_ref: String,
@@ -291,6 +299,31 @@ enum PolicyCommand {
         http_path: Option<String>,
         #[arg(long)]
         http_request_body_bytes: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    PlaintextExport {
+        #[command(subcommand)]
+        command: PlaintextExportCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlaintextExportCommand {
+    Status,
+    Enable {
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        mfa_code: Option<String>,
+    },
+    Disable {
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        mfa_code: Option<String>,
     },
 }
 
@@ -404,6 +437,10 @@ enum TicketCommand {
         http_request_body_bytes: Option<u64>,
         #[arg(long)]
         passphrase: Option<String>,
+        #[arg(long)]
+        allow_plaintext: bool,
+        #[arg(long)]
+        mfa_code: Option<String>,
     },
 }
 
@@ -874,9 +911,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 secret_ref,
                 passphrase,
                 allow_plaintext,
+                mfa_code,
             } => {
-                require_plaintext_export_confirmation(allow_plaintext)?;
-                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let passphrase =
+                    plaintext_export_passphrase(&vault, passphrase, allow_plaintext, mfa_code)?;
                 let plaintext = vault.get_secret(&secret_ref, &passphrase)?;
                 print!("{}", String::from_utf8_lossy(&plaintext));
             }
@@ -1106,6 +1144,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Command::Config { command } => match command {
+            ConfigCommand::PlaintextExport { command } => match command {
+                PlaintextExportCommand::Status => {
+                    let enabled = vault.plaintext_export_enabled()?;
+                    let mfa_required = vault.totp_mfa_enrolled()?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "plaintext_export_enabled": enabled,
+                                "mfa_required_when_enrolled": mfa_required,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "plaintext_export: {}",
+                            if enabled { "enabled" } else { "disabled" }
+                        );
+                        println!("mfa_required: {mfa_required}");
+                    }
+                }
+                PlaintextExportCommand::Enable {
+                    passphrase,
+                    mfa_code,
+                } => {
+                    let passphrase = config_change_passphrase(&vault, passphrase, mfa_code)?;
+                    vault.set_plaintext_export_enabled(&passphrase, true)?;
+                    println!("plaintext export enabled");
+                }
+                PlaintextExportCommand::Disable {
+                    passphrase,
+                    mfa_code,
+                } => {
+                    let passphrase = config_change_passphrase(&vault, passphrase, mfa_code)?;
+                    vault.set_plaintext_export_enabled(&passphrase, false)?;
+                    println!("plaintext export disabled");
+                }
+            },
+        },
         Command::Ticket { command } => match command {
             TicketCommand::List => {
                 let tickets = vault.list_tickets()?;
@@ -1259,7 +1336,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 consumer,
                 purpose,
                 delivery_mode,
-                raw_export_requested,
+                raw_export_requested: _raw_export_requested,
                 provider_assurance,
                 http_host,
                 http_scheme,
@@ -1267,15 +1344,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 http_path,
                 http_request_body_bytes,
                 passphrase,
+                allow_plaintext,
+                mfa_code,
             } => {
-                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let passphrase =
+                    plaintext_export_passphrase(&vault, passphrase, allow_plaintext, mfa_code)?;
                 let ticket = vault.load_ticket(&ticket_id)?;
                 let request = build_access_request(
                     ticket.secret_ref,
                     consumer,
                     purpose,
                     &delivery_mode,
-                    raw_export_requested,
+                    true,
                     provider_assurance,
                     http_host,
                     http_scheme,
@@ -1913,12 +1993,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             purpose,
             delivery_mode,
             allow_plaintext,
+            mfa_code,
         } => {
             if !secret_ref.starts_with("secret://") {
                 return Err("resolve requires a secret:// reference".into());
             }
-            require_plaintext_export_confirmation(allow_plaintext)?;
             if broker {
+                require_plaintext_export_confirmation(allow_plaintext)?;
                 let response = broker_daemon::request(
                     socket,
                     &json!({
@@ -1944,7 +2025,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("broker response did not include a secret")?;
                 print!("{secret}");
             } else {
-                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let passphrase =
+                    plaintext_export_passphrase(&vault, passphrase, allow_plaintext, mfa_code)?;
                 let plaintext = vault.get_secret(&secret_ref, &passphrase)?;
                 print!("{}", String::from_utf8_lossy(&plaintext));
             }
@@ -2065,6 +2147,41 @@ fn require_plaintext_export_confirmation(
     } else {
         Err("plaintext export requires --allow-plaintext; prefer hbse run, hbse dotenv run, or broker provider-http when possible".into())
     }
+}
+
+fn plaintext_export_passphrase(
+    vault: &LocalVault,
+    passphrase: Option<String>,
+    allow_plaintext: bool,
+    mfa_code: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    require_plaintext_export_confirmation(allow_plaintext)?;
+    if !vault.plaintext_export_enabled()? {
+        return Err(
+            "plaintext export is disabled; enable it with `hbse config plaintext-export enable`"
+                .into(),
+        );
+    }
+    let passphrase = unlock_passphrase(vault, passphrase)?;
+    if vault.totp_mfa_enrolled()? {
+        let code =
+            mfa_code.ok_or("plaintext export requires --mfa-code when TOTP MFA is enrolled")?;
+        vault.verify_totp_mfa(&passphrase, &code)?;
+    }
+    Ok(passphrase)
+}
+
+fn config_change_passphrase(
+    vault: &LocalVault,
+    passphrase: Option<String>,
+    mfa_code: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let passphrase = unlock_passphrase(vault, passphrase)?;
+    if vault.totp_mfa_enrolled()? {
+        let code = mfa_code.ok_or("config change requires --mfa-code when TOTP MFA is enrolled")?;
+        vault.verify_totp_mfa(&passphrase, &code)?;
+    }
+    Ok(passphrase)
 }
 
 fn unlock_passphrase(

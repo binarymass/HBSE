@@ -60,6 +60,8 @@ hbse vault recovery-inspect recovery-package.json --recovery-mnemonic '...'
 ## Local Hardening Checklist
 
 - Prefer `tpm2-direct` on systems with TPM hardware.
+- Keep plaintext export disabled except for short interactive maintenance windows.
+- Enroll TOTP MFA when plaintext export may ever be enabled.
 - Keep the vault file under a user-private directory.
 - Use `hbse broker install-service --scope user --enable --start` for a managed local broker.
 - Keep broker sockets under a private runtime directory.

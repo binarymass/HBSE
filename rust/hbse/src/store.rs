@@ -155,6 +155,22 @@ impl SQLiteVaultStore {
         Ok(())
     }
 
+    pub fn get_metadata(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.initialize_schema()?;
+        let conn = self.connect()?;
+        get_metadata(&conn, key)
+    }
+
+    pub fn set_metadata(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.initialize_schema()?;
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO vault_metadata (key, value) VALUES (?, ?)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn save_secret_record(&self, record: &SecretRecord) -> Result<(), StoreError> {
         self.initialize_schema()?;
         let conn = self.connect()?;
