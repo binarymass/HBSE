@@ -318,6 +318,8 @@ enum PlaintextExportCommand {
         passphrase: Option<String>,
         #[arg(long)]
         mfa_code: Option<String>,
+        #[arg(long)]
+        allow_without_mfa: bool,
     },
     Disable {
         #[arg(long)]
@@ -1148,13 +1150,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ConfigCommand::PlaintextExport { command } => match command {
                 PlaintextExportCommand::Status => {
                     let enabled = vault.plaintext_export_enabled()?;
-                    let mfa_required = vault.totp_mfa_enrolled()?;
+                    let mfa_enrolled = vault.totp_mfa_enrolled()?;
                     if cli.json {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&json!({
                                 "plaintext_export_enabled": enabled,
-                                "mfa_required_when_enrolled": mfa_required,
+                                "totp_mfa_enrolled": mfa_enrolled,
+                                "mfa_required_for_plaintext_export": enabled && mfa_enrolled,
                             }))?
                         );
                     } else {
@@ -1162,15 +1165,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "plaintext_export: {}",
                             if enabled { "enabled" } else { "disabled" }
                         );
-                        println!("mfa_required: {mfa_required}");
+                        println!(
+                            "totp_mfa: {}",
+                            if mfa_enrolled {
+                                "enrolled"
+                            } else {
+                                "not enrolled"
+                            }
+                        );
+                        println!(
+                            "mfa_required_for_plaintext_export: {}",
+                            enabled && mfa_enrolled
+                        );
                     }
                 }
                 PlaintextExportCommand::Enable {
                     passphrase,
                     mfa_code,
+                    allow_without_mfa,
                 } => {
                     let passphrase = config_change_passphrase(&vault, passphrase, mfa_code)?;
-                    vault.set_plaintext_export_enabled(&passphrase, true)?;
+                    vault.set_plaintext_export_enabled(&passphrase, true, allow_without_mfa)?;
                     println!("plaintext export enabled");
                 }
                 PlaintextExportCommand::Disable {
@@ -1178,7 +1193,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     mfa_code,
                 } => {
                     let passphrase = config_change_passphrase(&vault, passphrase, mfa_code)?;
-                    vault.set_plaintext_export_enabled(&passphrase, false)?;
+                    vault.set_plaintext_export_enabled(&passphrase, false, true)?;
                     println!("plaintext export disabled");
                 }
             },

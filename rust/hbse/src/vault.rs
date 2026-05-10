@@ -91,6 +91,8 @@ pub enum VaultError {
     MfaInvalidCode,
     #[error("plaintext export is disabled by local vault config")]
     PlaintextExportDisabled,
+    #[error("plaintext export enablement requires enrolled TOTP MFA unless explicitly overridden")]
+    PlaintextExportMfaEnrollmentRequired,
     #[error("plaintext export requires verified TOTP MFA")]
     PlaintextExportMfaRequired,
     #[error("ticket policy is no longer active or compatible")]
@@ -270,8 +272,12 @@ impl LocalVault {
         &self,
         passphrase: &str,
         enabled: bool,
+        allow_without_mfa: bool,
     ) -> Result<(), VaultError> {
         let (header, keys) = self.unlock(Some(passphrase))?;
+        if enabled && !allow_without_mfa && !self.totp_mfa_enrolled()? {
+            return Err(VaultError::PlaintextExportMfaEnrollmentRequired);
+        }
         self.store.set_metadata(
             PLAINTEXT_EXPORT_CONFIG_KEY,
             if enabled { "enabled" } else { "disabled" },
@@ -288,6 +294,7 @@ impl LocalVault {
             "allow",
             map_from_json(json!({
                 "plaintext_export_enabled": enabled,
+                "allow_without_mfa": allow_without_mfa,
             })),
         )?;
         Ok(())
@@ -1317,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_export_is_disabled_by_default_and_requires_mfa_when_enrolled() {
+    fn plaintext_export_is_disabled_by_default_and_requires_mfa_enrollment() {
         let dir = tempdir().unwrap();
         let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
         vault.init("passphrase", "default").unwrap();
@@ -1328,17 +1335,19 @@ mod tests {
             Err(VaultError::PlaintextExportDisabled)
         ));
 
-        vault
-            .set_plaintext_export_enabled("passphrase", true)
-            .unwrap();
-        assert!(vault.plaintext_export_enabled().unwrap());
-        vault
-            .enforce_plaintext_export_allowed(false)
-            .expect("plaintext export allowed before MFA enrollment");
+        assert!(matches!(
+            vault.set_plaintext_export_enabled("passphrase", true, false),
+            Err(VaultError::PlaintextExportMfaEnrollmentRequired)
+        ));
+        assert!(!vault.plaintext_export_enabled().unwrap());
 
         vault
             .enroll_totp_mfa("passphrase", "HBSE", "test@example.local")
             .unwrap();
+        vault
+            .set_plaintext_export_enabled("passphrase", true, false)
+            .unwrap();
+        assert!(vault.plaintext_export_enabled().unwrap());
         assert!(matches!(
             vault.enforce_plaintext_export_allowed(false),
             Err(VaultError::PlaintextExportMfaRequired)
@@ -1449,7 +1458,7 @@ mod tests {
         let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
         vault.init("passphrase", "default").unwrap();
         vault
-            .set_plaintext_export_enabled("passphrase", true)
+            .set_plaintext_export_enabled("passphrase", true, true)
             .unwrap();
         vault
             .put_secret(
@@ -1520,7 +1529,7 @@ mod tests {
         let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
         vault.init("passphrase", "default").unwrap();
         vault
-            .set_plaintext_export_enabled("passphrase", true)
+            .set_plaintext_export_enabled("passphrase", true, true)
             .unwrap();
         vault
             .put_secret(

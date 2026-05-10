@@ -527,12 +527,13 @@ hbse --vault vault.db secret inspect secret://app/api-key
 Resolve a `secret://` reference in a terminal:
 
 ```bash
+hbse mfa enroll-totp --issuer HBSE --account workstation
 hbse config plaintext-export enable
 hbse --vault vault.db resolve --allow-plaintext secret://app/api-key
 hbse resolve --broker --allow-plaintext --purpose provider-call secret://app/api-key
 ```
 
-Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require local plaintext export to be enabled, require `--allow-plaintext`, and require a TOTP code when MFA is enrolled. Broker-backed resolution also requires policy export permission.
+Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require local plaintext export to be enabled, require `--allow-plaintext`, and require a TOTP code when MFA is enrolled. Enabling plaintext export requires enrolled TOTP MFA by default; use `hbse config plaintext-export enable --allow-without-mfa` only for intentional emergency or no-MFA deployments. Broker-backed resolution also requires policy export permission.
 
 Disable plaintext export when it is not actively needed:
 
