@@ -528,18 +528,20 @@ Resolve a `secret://` reference in a terminal:
 
 ```bash
 hbse mfa enroll-totp --issuer HBSE --account workstation
-hbse config plaintext-export enable
-hbse --vault vault.db resolve --allow-plaintext secret://app/api-key
+hbse config plaintext-export enable --mfa-code 123456
+hbse --vault vault.db resolve --allow-plaintext --mfa-code 123456 secret://app/api-key
 hbse resolve --broker --allow-plaintext --purpose provider-call secret://app/api-key
 ```
 
-Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require local plaintext export to be enabled, require `--allow-plaintext`, and require a TOTP code when MFA is enrolled. Enabling plaintext export requires enrolled TOTP MFA by default; use `hbse config plaintext-export enable --allow-without-mfa` only for intentional emergency or no-MFA deployments. Broker-backed resolution also requires policy export permission.
+Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require local plaintext export to be enabled, require `--allow-plaintext`, and require a TOTP code when MFA is enrolled. Enabling plaintext export requires enrolled TOTP MFA by default; use `hbse config plaintext-export enable --allow-without-mfa` only for intentional emergency or no-MFA deployments. Broker-backed resolution also requires broker MFA verification and policy export permission.
 
 Disable plaintext export when it is not actively needed:
 
 ```bash
-hbse config plaintext-export disable
+hbse config plaintext-export disable --mfa-code 123456
 ```
+
+When TOTP MFA is enrolled, plaintext-export configuration changes require `--mfa-code` for both enable and disable operations.
 
 Disable a secret:
 
@@ -555,7 +557,7 @@ hbse --vault vault.db secret destroy \
   secret://app/api-key
 ```
 
-Raw secret retrieval is intentionally constrained. `hbse secret get` and `hbse resolve` require `hbse config plaintext-export enable` and `--allow-plaintext`. Prefer `hbse run`, broker materialization, or provider HTTP instead of printing raw secrets.
+Raw secret retrieval is intentionally constrained. `hbse secret get` and `hbse resolve` require `hbse config plaintext-export enable`, `--allow-plaintext`, and `--mfa-code` when TOTP MFA is enrolled. Prefer `hbse run`, broker materialization, or provider HTTP instead of printing raw secrets.
 
 ## Policy Commands
 
@@ -813,6 +815,7 @@ hbse broker checkout \
 Materialize through the broker:
 
 ```bash
+hbse broker mfa-verify --socket /tmp/hbse.sock 123456
 hbse broker materialize \
   --socket /tmp/hbse.sock \
   --secret-ref secret://app/api-key \
