@@ -72,6 +72,35 @@ Working specifications, internal notes, chat history, local vaults, build output
 
 ## Build And Install
 
+Install the native binaries for the current user:
+
+```bash
+rust/install.sh
+```
+
+Install the native binaries and enable the user broker service:
+
+```bash
+rust/install.sh --service user --enable-service --start-service
+```
+
+Install system-wide:
+
+```bash
+sudo rust/install.sh --prefix /usr/local
+```
+
+Install system-wide with a system broker service:
+
+```bash
+sudo rust/install.sh \
+  --prefix /usr/local \
+  --service system \
+  --service-user hbse \
+  --enable-service \
+  --start-service
+```
+
 Build the native bundle from the repository root:
 
 ```bash
@@ -114,6 +143,20 @@ The resulting binaries are:
 rust/target/release/hbse
 rust/target/release/hbse-broker
 ```
+
+Uninstall user-level binaries and broker units:
+
+```bash
+rust/uninstall.sh
+```
+
+Uninstall system-level binaries and broker units:
+
+```bash
+sudo rust/uninstall.sh --prefix /usr/local --service system
+```
+
+The uninstaller does not delete vault data unless `--purge-vault` is supplied.
 
 ## Python Package
 
