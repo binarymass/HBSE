@@ -1,0 +1,10 @@
+[Unit]
+Description=HBSE local broker socket
+
+[Socket]
+ListenStream=%t/hbse/broker.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

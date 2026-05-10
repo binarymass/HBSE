@@ -1,0 +1,335 @@
+syntax = "proto3";
+
+package hbse.v1;
+
+option go_package = "hbse/v1;hbsev1";
+
+message Empty {}
+
+message Error {
+  string code = 1;
+  string message = 2;
+  string request_id = 3;
+  string audit_event_id = 4;
+}
+
+enum DeliveryMode {
+  DELIVERY_MODE_UNSPECIFIED = 0;
+  DELIVERY_MODE_CALLBACK = 1;
+  DELIVERY_MODE_PIPE = 2;
+  DELIVERY_MODE_FD = 3;
+  DELIVERY_MODE_TEMP_FILE = 4;
+  DELIVERY_MODE_CHILD_ENV = 5;
+  DELIVERY_MODE_RAW = 6;
+  DELIVERY_MODE_TERMINAL_PRINT = 7;
+}
+
+message VaultStatusRequest {}
+
+message VaultStatusResponse {
+  bool initialized = 1;
+  string vault_id = 2;
+  string namespace_id = 3;
+  string provider_id = 4;
+  string assurance_level = 5;
+  uint32 secret_count = 6;
+}
+
+message PassphraseRequest {
+  string passphrase = 1;
+}
+
+message BackupRequest {
+  string destination = 1;
+}
+
+message BackupResponse {
+  uint32 format_version = 1;
+  string created_at = 2;
+  string vault_id = 3;
+  string database_sha256 = 4;
+  bool contains_plaintext_secrets = 5;
+  bool contains_plaintext_root_key = 6;
+}
+
+message RestoreRequest {
+  string source = 1;
+}
+
+message RecoveryPackageRequest {
+  string passphrase = 1;
+  string recovery_secret = 2;
+  string destination = 3;
+}
+
+message RecoverRequest {
+  string package_path = 1;
+  string recovery_secret = 2;
+  string new_provider = 3;
+  string new_passphrase = 4;
+  string tpm_device = 5;
+}
+
+message ProviderBindingResponse {
+  string vault_id = 1;
+  string provider_id = 2;
+  string assurance_level = 3;
+}
+
+message SecretPutRequest {
+  string secret_ref = 1;
+  bytes value = 2;
+  string passphrase = 3;
+}
+
+message SecretSummary {
+  string secret_ref = 1;
+  string secret_id = 2;
+  string namespace_id = 3;
+  uint32 latest_version = 4;
+  string status = 5;
+  string secret_type = 6;
+  string created_at = 7;
+}
+
+message SecretListRequest {}
+
+message SecretListResponse {
+  repeated SecretSummary secrets = 1;
+}
+
+message SecretMetadataRequest {
+  string secret_ref = 1;
+}
+
+message SecretMetadataResponse {
+  string secret_ref = 1;
+  string secret_id = 2;
+  string namespace_id = 3;
+  uint32 version = 4;
+  string status = 5;
+  string secret_type = 6;
+  string created_at = 7;
+}
+
+message DisableSecretRequest {
+  string secret_ref = 1;
+  string passphrase = 2;
+}
+
+message RotationStartRequest {
+  string secret_ref = 1;
+  bytes value = 2;
+  string passphrase = 3;
+}
+
+message RotationJob {
+  string job_id = 1;
+  string vault_id = 2;
+  string secret_ref = 3;
+  uint32 staged_version = 4;
+  string status = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  string verifier = 8;
+  string failure_reason = 9;
+}
+
+message RotationJobRequest {
+  string job_id = 1;
+  string passphrase = 2;
+}
+
+message RotationJobListRequest {}
+
+message RotationJobListResponse {
+  repeated RotationJob rotation_jobs = 1;
+}
+
+message PolicyCreateRequest {
+  string policy_id = 1;
+  repeated string secret_refs = 2;
+  repeated string allowed_consumers = 3;
+  repeated string allowed_purposes = 4;
+  repeated DeliveryMode allowed_delivery_modes = 5;
+  bool exportable = 6;
+  uint32 max_ticket_ttl_seconds = 7;
+  uint32 max_uses = 8;
+}
+
+message PolicyResponse {
+  string policy_id = 1;
+}
+
+message PolicyTestRequest {
+  string policy_id = 1;
+  string secret_ref = 2;
+  string consumer = 3;
+  string purpose = 4;
+  DeliveryMode delivery_mode = 5;
+  string provider_assurance = 6;
+  bool raw_export_requested = 7;
+}
+
+message PolicyTestResponse {
+  string decision = 1;
+  string reason = 2;
+}
+
+message TicketIssueRequest {
+  string secret_ref = 1;
+  string consumer = 2;
+  string purpose = 3;
+  DeliveryMode delivery_mode = 4;
+  string passphrase = 5;
+  bool raw_export_requested = 6;
+}
+
+message Ticket {
+  string ticket_id = 1;
+  string vault_id = 2;
+  string secret_ref = 3;
+  string consumer = 4;
+  string purpose = 5;
+  DeliveryMode delivery_mode = 6;
+  string policy_id = 7;
+  string policy_hash = 8;
+  string issued_at = 9;
+  string expires_at = 10;
+  uint32 max_uses = 11;
+  uint32 uses_remaining = 12;
+  bool revoked = 13;
+}
+
+message TicketRequest {
+  string ticket_id = 1;
+  string passphrase = 2;
+}
+
+message TicketConsumeRequest {
+  string ticket_id = 1;
+  string consumer = 2;
+  string purpose = 3;
+  DeliveryMode delivery_mode = 4;
+  string passphrase = 5;
+  bool raw_export_requested = 6;
+}
+
+message MaterializedSecret {
+  bytes secret = 1;
+}
+
+message MaterializeRequest {
+  string secret_ref = 1;
+  string consumer = 2;
+  string purpose = 3;
+  DeliveryMode delivery_mode = 4;
+  string passphrase = 5;
+  bool raw_export_requested = 6;
+}
+
+message ProviderStatus {
+  bool available = 1;
+  string device_path = 2;
+  bool tools_available = 3;
+  bool device_accessible = 4;
+  string detail = 5;
+}
+
+message ProviderListResponse {
+  repeated ProviderStatus providers = 1;
+}
+
+message ProviderTestRequest {
+  string provider_id = 1;
+}
+
+message ProviderEnrollRequest {
+  string provider_id = 1;
+  string current_passphrase = 2;
+  string new_passphrase = 3;
+  string tpm_device = 4;
+}
+
+message AuditQueryRequest {}
+
+message AuditEvent {
+  string event_id = 1;
+  string timestamp = 2;
+  string vault_id = 3;
+  string namespace_id = 4;
+  string event_type = 5;
+  string severity = 6;
+  string decision = 7;
+  string previous_hash = 8;
+  string event_hash = 9;
+  map<string, string> metadata = 10;
+}
+
+message AuditQueryResponse {
+  repeated AuditEvent events = 1;
+}
+
+message DoctorRequest {}
+
+message DoctorResponse {
+  map<string, string> checks = 1;
+}
+
+service VaultService {
+  rpc Status(VaultStatusRequest) returns (VaultStatusResponse);
+  rpc Unlock(PassphraseRequest) returns (VaultStatusResponse);
+  rpc Lock(Empty) returns (VaultStatusResponse);
+  rpc Backup(BackupRequest) returns (BackupResponse);
+  rpc Restore(RestoreRequest) returns (BackupResponse);
+  rpc CreateRecoveryPackage(RecoveryPackageRequest) returns (Empty);
+  rpc Recover(RecoverRequest) returns (ProviderBindingResponse);
+}
+
+service SecretService {
+  rpc Create(SecretPutRequest) returns (SecretMetadataResponse);
+  rpc Rotate(SecretPutRequest) returns (SecretMetadataResponse);
+  rpc Disable(DisableSecretRequest) returns (SecretMetadataResponse);
+  rpc List(SecretListRequest) returns (SecretListResponse);
+  rpc Metadata(SecretMetadataRequest) returns (SecretMetadataResponse);
+}
+
+service RotationService {
+  rpc Start(RotationStartRequest) returns (RotationJob);
+  rpc Verify(RotationJobRequest) returns (RotationJob);
+  rpc Promote(RotationJobRequest) returns (RotationJob);
+  rpc Rollback(RotationJobRequest) returns (RotationJob);
+  rpc List(RotationJobListRequest) returns (RotationJobListResponse);
+}
+
+service TicketService {
+  rpc Request(TicketIssueRequest) returns (Ticket);
+  rpc Validate(TicketRequest) returns (Ticket);
+  rpc Consume(TicketConsumeRequest) returns (MaterializedSecret);
+  rpc Revoke(TicketRequest) returns (Ticket);
+}
+
+service PolicyService {
+  rpc Create(PolicyCreateRequest) returns (PolicyResponse);
+  rpc Test(PolicyTestRequest) returns (PolicyTestResponse);
+}
+
+service ProviderService {
+  rpc Detect(Empty) returns (ProviderListResponse);
+  rpc Test(ProviderTestRequest) returns (ProviderStatus);
+  rpc Enroll(ProviderEnrollRequest) returns (ProviderBindingResponse);
+}
+
+service AuditService {
+  rpc Query(AuditQueryRequest) returns (AuditQueryResponse);
+  rpc Verify(PassphraseRequest) returns (DoctorResponse);
+}
+
+service MaterializationService {
+  rpc UseCallback(MaterializeRequest) returns (MaterializedSecret);
+  rpc OpenPipe(MaterializeRequest) returns (stream MaterializedSecret);
+}
+
+service DiagnosticsService {
+  rpc Doctor(DoctorRequest) returns (DoctorResponse);
+}

@@ -1,0 +1,21 @@
+pub mod audit;
+pub mod backup;
+pub mod broker_daemon;
+pub mod crypto;
+pub mod dotenv;
+pub mod keys;
+pub mod policy;
+pub mod provider;
+pub mod provider_tpm2;
+pub mod records;
+pub mod recovery;
+pub mod redaction;
+pub mod release;
+pub mod rotation;
+pub mod serialization;
+pub mod store;
+pub mod systemd;
+pub mod tickets;
+pub mod vault;
+
+pub const HBSE_VERSION: &str = env!("CARGO_PKG_VERSION");

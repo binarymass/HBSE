@@ -1,0 +1,20 @@
+[Unit]
+Description=HBSE local broker
+Documentation=file:/usr/share/doc/hbse/operations.md
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HBSE_VAULT_PATH=%h/.local/share/hbse/vault.db
+ExecStart=%h/.local/bin/hbse-broker --vault ${HBSE_VAULT_PATH} --socket %t/hbse/broker.sock --idle-timeout-seconds 900
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/hbse %t/hbse
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
