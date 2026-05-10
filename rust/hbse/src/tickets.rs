@@ -44,13 +44,21 @@ pub enum TicketValidationError {
     ExecutablePathContextMismatch,
     #[error("ticket executable hash context mismatch")]
     ExecutableHashContextMismatch,
+    #[error("ticket policy context mismatch")]
+    PolicyContextMismatch,
+    #[error("ticket broker session context mismatch")]
+    BrokerSessionContextMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretAccessTicket {
     pub ticket_id: String,
     pub vault_id: String,
+    #[serde(default)]
+    pub secret_id: String,
     pub secret_ref: String,
+    #[serde(default)]
+    pub secret_version: u64,
     pub consumer: String,
     pub purpose: String,
     pub delivery_mode: DeliveryMode,
@@ -64,6 +72,14 @@ pub struct SecretAccessTicket {
     pub executable_sha256: Option<String>,
     pub policy_id: String,
     pub policy_hash: String,
+    #[serde(default)]
+    pub exportable: bool,
+    #[serde(default)]
+    pub model_visible: bool,
+    #[serde(default)]
+    pub shell_visible: bool,
+    #[serde(default)]
+    pub broker_session_id: Option<String>,
     pub issued_at: String,
     pub expires_at: String,
     pub max_uses: u32,
@@ -98,16 +114,21 @@ impl TicketManager {
     pub fn issue(
         &self,
         vault_id: &str,
+        secret_id: &str,
+        secret_version: u64,
         request: &AccessRequest,
         policy: &AccessPolicy,
         policy_hash: &str,
+        broker_session_id: Option<String>,
     ) -> SecretAccessTicket {
         let issued_at = request.now;
         let expires_at = issued_at + Duration::seconds(policy.max_ticket_ttl_seconds as i64);
         let mut ticket = SecretAccessTicket {
             ticket_id: Uuid::new_v4().to_string(),
             vault_id: vault_id.to_string(),
+            secret_id: secret_id.to_string(),
             secret_ref: request.secret_ref.clone(),
+            secret_version,
             consumer: request.consumer.clone(),
             purpose: request.purpose.clone(),
             delivery_mode: request.delivery_mode,
@@ -121,6 +142,13 @@ impl TicketManager {
             executable_sha256: request.executable_sha256.clone(),
             policy_id: policy.policy_id.clone(),
             policy_hash: policy_hash.to_string(),
+            exportable: policy.exportable,
+            model_visible: false,
+            shell_visible: matches!(
+                request.delivery_mode,
+                DeliveryMode::ChildEnv | DeliveryMode::TerminalPrint | DeliveryMode::Raw
+            ),
+            broker_session_id,
             issued_at: utc_millis(issued_at),
             expires_at: utc_millis(expires_at),
             max_uses: policy.max_uses,
@@ -155,6 +183,9 @@ impl TicketManager {
         }
         if ticket.secret_ref != request.secret_ref {
             return Err(TicketValidationError::SecretContextMismatch);
+        }
+        if !ticket.broker_session_id_matches(request.broker_session_id.as_deref()) {
+            return Err(TicketValidationError::BrokerSessionContextMismatch);
         }
         if ticket.consumer != request.consumer {
             return Err(TicketValidationError::ConsumerContextMismatch);
@@ -192,6 +223,18 @@ impl TicketManager {
         Ok(())
     }
 
+    pub fn validate_policy(
+        &self,
+        ticket: &SecretAccessTicket,
+        policy: &AccessPolicy,
+        current_policy_hash: &str,
+    ) -> Result<(), TicketValidationError> {
+        if ticket.policy_id != policy.policy_id || ticket.policy_hash != current_policy_hash {
+            return Err(TicketValidationError::PolicyContextMismatch);
+        }
+        Ok(())
+    }
+
     pub fn consume(
         &self,
         ticket: &SecretAccessTicket,
@@ -225,6 +268,16 @@ impl TicketManager {
     }
 }
 
+impl SecretAccessTicket {
+    fn broker_session_id_matches(&self, request_session: Option<&str>) -> bool {
+        match (&self.broker_session_id, request_session) {
+            (Some(ticket_session), Some(request_session)) => ticket_session == request_session,
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    }
+}
+
 pub fn policy_hash(policy: &AccessPolicy) -> String {
     let canonical = canonical_json_bytes(policy).expect("policy serializes canonically");
     b64url_no_padding(&Sha256::digest(canonical))
@@ -252,6 +305,7 @@ mod tests {
             executable_path: None,
             executable_sha256: None,
             mfa_verified: false,
+            broker_session_id: None,
             now: Utc::now(),
         }
     }
@@ -269,7 +323,7 @@ mod tests {
             ..serde_json::from_value(serde_json::json!({"policy_id":"defaults"})).unwrap()
         };
         let request = request();
-        let ticket = manager.issue("vault-1", &request, &policy, "hash");
+        let ticket = manager.issue("vault-1", "api", 1, &request, &policy, "hash", None);
         let consumed = manager.consume(&ticket, &request, Utc::now()).unwrap();
         assert_eq!(
             manager
@@ -291,6 +345,37 @@ mod tests {
         assert_eq!(
             manager.validate(&ticket, &wrong, Utc::now()).unwrap_err(),
             TicketValidationError::ConsumerContextMismatch
+        );
+    }
+
+    #[test]
+    fn broker_session_bound_ticket_requires_matching_session() {
+        let manager = TicketManager::new(vec![7; 32]);
+        let policy = AccessPolicy {
+            policy_id: "p1".to_string(),
+            secret_refs: vec!["secret://default/api".to_string()],
+            allowed_consumers: vec!["cli".to_string()],
+            allowed_purposes: vec!["deploy".to_string()],
+            allowed_delivery_modes: vec![DeliveryMode::TerminalPrint],
+            exportable: true,
+            ..serde_json::from_value(serde_json::json!({"policy_id":"defaults"})).unwrap()
+        };
+        let mut request = request();
+        request.broker_session_id = Some("session-1".to_string());
+        let ticket = manager.issue(
+            "vault-1",
+            "api",
+            1,
+            &request,
+            &policy,
+            "hash",
+            Some("session-1".to_string()),
+        );
+
+        request.broker_session_id = Some("session-2".to_string());
+        assert_eq!(
+            manager.validate(&ticket, &request, Utc::now()).unwrap_err(),
+            TicketValidationError::BrokerSessionContextMismatch
         );
     }
 }

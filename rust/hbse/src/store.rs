@@ -20,6 +20,8 @@ pub enum StoreError {
     VaultAlreadyInitialized,
     #[error("secret not found: {0}")]
     SecretNotFound(String),
+    #[error("ticket changed during consume: {0}")]
+    TicketConflict(String),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("json error: {0}")]
@@ -209,6 +211,27 @@ impl SQLiteVaultStore {
         Ok(serde_json::from_str(&raw)?)
     }
 
+    pub fn load_secret_version(
+        &self,
+        secret_ref: &str,
+        version: u64,
+    ) -> Result<SecretRecord, StoreError> {
+        self.initialize_schema()?;
+        let conn = self.connect()?;
+        let raw: Option<String> = conn
+            .query_row(
+                r#"
+                SELECT record_json FROM secret_records
+                WHERE secret_ref = ? AND version = ?
+                "#,
+                params![secret_ref, version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let raw = raw.ok_or_else(|| StoreError::SecretNotFound(secret_ref.to_string()))?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
     pub fn save_updated_secret_status(
         &self,
         secret_ref: &str,
@@ -302,6 +325,28 @@ impl SQLiteVaultStore {
             params![ticket.ticket_id, serde_json::to_string(ticket)?],
         )?;
         Ok(())
+    }
+
+    pub fn save_ticket_if_current(
+        &self,
+        expected: &SecretAccessTicket,
+        updated: &SecretAccessTicket,
+    ) -> Result<(), StoreError> {
+        self.initialize_schema()?;
+        let conn = self.connect()?;
+        let changed = conn.execute(
+            "UPDATE tickets SET ticket_json = ? WHERE ticket_id = ? AND ticket_json = ?",
+            params![
+                serde_json::to_string(updated)?,
+                expected.ticket_id,
+                serde_json::to_string(expected)?,
+            ],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::TicketConflict(expected.ticket_id.clone()))
+        }
     }
 
     pub fn load_ticket(&self, ticket_id: &str) -> Result<Option<SecretAccessTicket>, StoreError> {

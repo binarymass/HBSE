@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ureq::Agent;
+use uuid::Uuid;
 
 use crate::policy::{AccessRequest, DeliveryMode};
 use crate::provider::PASSPHRASE_PROVIDER_ID;
@@ -51,6 +52,7 @@ pub struct BrokerState {
     unlocked_passphrase: Option<String>,
     unlocked: bool,
     mfa_verified: bool,
+    broker_session_id: Option<String>,
     last_activity: Option<SystemTime>,
 }
 
@@ -62,6 +64,7 @@ impl BrokerState {
             unlocked_passphrase: None,
             unlocked: false,
             mfa_verified: false,
+            broker_session_id: None,
             last_activity: None,
         }
     }
@@ -140,6 +143,7 @@ fn handle_connection(
             "ok": true,
             "unlocked": state.unlocked,
             "mfa_verified": state.mfa_verified,
+            "broker_session_id": state.broker_session_id,
             "idle_timeout_seconds": state.idle_timeout_seconds,
             "last_activity": state.last_activity.and_then(system_time_millis),
             "peer": peer,
@@ -159,8 +163,11 @@ fn handle_connection(
                 state.mfa_verified = true;
             }
             state.unlocked = true;
+            state.broker_session_id = Some(Uuid::new_v4().to_string());
             mark_activity(state);
-            Ok(json!({"ok": true, "unlocked": true, "mfa_verified": state.mfa_verified}))
+            Ok(
+                json!({"ok": true, "unlocked": true, "mfa_verified": state.mfa_verified, "broker_session_id": state.broker_session_id}),
+            )
         }
         "mfa_verify" => {
             require_unlocked(state)?;
@@ -173,13 +180,20 @@ fn handle_connection(
             state.unlocked_passphrase = None;
             state.unlocked = false;
             state.mfa_verified = false;
+            state.broker_session_id = None;
             state.last_activity = None;
             Ok(json!({"ok": true, "unlocked": false}))
         }
         "checkout" => {
             require_unlocked(state)?;
             let vault = state.vault();
-            let access = access_request(&request, &peer, false, state.mfa_verified)?;
+            let access = access_request(
+                &request,
+                &peer,
+                false,
+                state.mfa_verified,
+                state.broker_session_id.clone(),
+            )?;
             let ticket =
                 vault.issue_ticket(access, state.unlocked_passphrase.as_deref().unwrap_or(""))?;
             mark_activity(state);
@@ -196,6 +210,7 @@ fn handle_connection(
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 state.mfa_verified,
+                state.broker_session_id.clone(),
             )?;
             let ticket = vault.issue_ticket(
                 access.clone(),
@@ -222,6 +237,7 @@ fn handle_connection(
                 &request,
                 &peer,
                 state.mfa_verified,
+                state.broker_session_id.clone(),
             )?;
             mark_activity(state);
             Ok(json!({
@@ -251,6 +267,7 @@ fn brokered_http_request(
     request: &Value,
     peer: &PeerIdentity,
     mfa_verified: bool,
+    broker_session_id: Option<String>,
 ) -> Result<BrokeredHttpResponse, BrokerError> {
     let url = str_field(request, "url")?;
     let method = request
@@ -290,6 +307,7 @@ fn brokered_http_request(
         executable_path: peer.exe_path.clone(),
         executable_sha256: peer.exe_sha256.clone(),
         mfa_verified,
+        broker_session_id,
         now: chrono::Utc::now(),
     };
     let ticket = vault.issue_ticket(access.clone(), passphrase)?;
@@ -429,6 +447,7 @@ fn expire_idle_unlock(state: &mut BrokerState) {
         state.unlocked_passphrase = None;
         state.unlocked = false;
         state.mfa_verified = false;
+        state.broker_session_id = None;
         state.last_activity = None;
     }
 }
@@ -438,6 +457,7 @@ fn access_request(
     peer: &PeerIdentity,
     raw_export_requested: bool,
     mfa_verified: bool,
+    broker_session_id: Option<String>,
 ) -> Result<AccessRequest, BrokerError> {
     let delivery_mode = parse_delivery_mode(str_field(value, "delivery_mode")?)?;
     Ok(AccessRequest {
@@ -477,6 +497,7 @@ fn access_request(
         executable_path: peer.exe_path.clone(),
         executable_sha256: peer.exe_sha256.clone(),
         mfa_verified,
+        broker_session_id,
         now: chrono::Utc::now(),
     })
 }

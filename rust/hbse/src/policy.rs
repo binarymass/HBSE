@@ -101,6 +101,7 @@ pub struct AccessRequest {
     pub executable_path: Option<String>,
     pub executable_sha256: Option<String>,
     pub mfa_verified: bool,
+    pub broker_session_id: Option<String>,
     pub now: DateTime<Utc>,
 }
 
@@ -370,6 +371,7 @@ mod tests {
             executable_path: None,
             executable_sha256: None,
             mfa_verified: false,
+            broker_session_id: None,
             now: Utc::now(),
         }
     }

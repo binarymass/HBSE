@@ -82,6 +82,10 @@ pub enum VaultError {
     MfaNotEnrolled,
     #[error("invalid TOTP MFA code")]
     MfaInvalidCode,
+    #[error("ticket policy is no longer active or compatible")]
+    TicketPolicyChanged,
+    #[error("ticket is bound to a stale secret version")]
+    TicketSecretVersionStale,
 }
 
 #[derive(Debug, Clone)]
@@ -606,6 +610,10 @@ impl LocalVault {
         passphrase: &str,
     ) -> Result<SecretAccessTicket, VaultError> {
         let (header, keys) = self.unlock(Some(passphrase))?;
+        let record = self.store.load_latest_secret(&request.secret_ref)?;
+        if record.status != SecretStatus::Active {
+            return Err(VaultError::SecretUnavailable(status_string(record.status)));
+        }
         let policies = self.store.list_policies()?;
         let engine = PolicyEngine::new(policies);
         let result = engine.evaluate(&request);
@@ -645,9 +653,12 @@ impl LocalVault {
 
         let ticket = TicketManager::new(keys.ticket_mac_key()).issue(
             &header.vault_id,
+            &record.secret_id,
+            record.secret_version,
             &request,
             policy,
             &policy_hash(policy),
+            request.broker_session_id.clone(),
         );
         self.store.save_ticket(&ticket)?;
         self.append_audit(
@@ -668,6 +679,62 @@ impl LocalVault {
         Ok(ticket)
     }
 
+    pub fn validate_ticket(
+        &self,
+        ticket_id: &str,
+        request: AccessRequest,
+        passphrase: &str,
+    ) -> Result<SecretAccessTicket, VaultError> {
+        let (_header, keys) = self.unlock(Some(passphrase))?;
+        let ticket = self
+            .store
+            .load_ticket(ticket_id)?
+            .ok_or(VaultError::TicketNotFound)?;
+        let manager = TicketManager::new(keys.ticket_mac_key());
+        manager.validate(&ticket, &request, Utc::now())?;
+        let policy = self.active_policy_for_ticket(&ticket)?;
+        manager.validate_policy(&ticket, &policy, &policy_hash(&policy))?;
+        self.ensure_ticket_secret_is_current(&ticket)?;
+        Ok(ticket)
+    }
+
+    pub fn renew_ticket(
+        &self,
+        ticket_id: &str,
+        request: AccessRequest,
+        passphrase: &str,
+    ) -> Result<SecretAccessTicket, VaultError> {
+        let (header, keys) = self.unlock(Some(passphrase))?;
+        let old_ticket = self.validate_ticket(ticket_id, request.clone(), passphrase)?;
+        let policy = self.active_policy_for_ticket(&old_ticket)?;
+        let renewed = TicketManager::new(keys.ticket_mac_key()).issue(
+            &header.vault_id,
+            &old_ticket.secret_id,
+            old_ticket.secret_version,
+            &request,
+            &policy,
+            &policy_hash(&policy),
+            old_ticket.broker_session_id.clone(),
+        );
+        let revoked = TicketManager::new(keys.ticket_mac_key()).revoke(&old_ticket)?;
+        self.store.save_ticket(&revoked)?;
+        self.store.save_ticket(&renewed)?;
+        self.append_audit(
+            &header,
+            &keys,
+            "ticket.renewed",
+            "info",
+            "allow",
+            map_from_json(json!({
+                "old_ticket_id": old_ticket.ticket_id,
+                "ticket_id": renewed.ticket_id,
+                "secret_ref": renewed.secret_ref,
+                "policy_id": renewed.policy_id,
+            })),
+        )?;
+        Ok(renewed)
+    }
+
     pub fn consume_ticket_for_secret(
         &self,
         ticket_id: &str,
@@ -681,7 +748,16 @@ impl LocalVault {
             .ok_or(VaultError::TicketNotFound)?;
         let manager = TicketManager::new(keys.ticket_mac_key());
         let updated = manager.consume(&ticket, &request, Utc::now())?;
-        let record = self.store.load_latest_secret(&ticket.secret_ref)?;
+        let policy = self.active_policy_for_ticket(&ticket)?;
+        manager.validate_policy(&ticket, &policy, &policy_hash(&policy))?;
+        self.ensure_ticket_secret_is_current(&ticket)?;
+        self.store.save_ticket_if_current(&ticket, &updated)?;
+        let record = if ticket.secret_version == 0 {
+            self.store.load_latest_secret(&ticket.secret_ref)?
+        } else {
+            self.store
+                .load_secret_version(&ticket.secret_ref, ticket.secret_version)?
+        };
         if record.status != SecretStatus::Active {
             self.append_audit(
                 &header,
@@ -698,7 +774,6 @@ impl LocalVault {
             return Err(VaultError::SecretUnavailable(status_string(record.status)));
         }
         let plaintext = self.crypto.decrypt_secret(&keys, &record)?;
-        self.store.save_ticket(&updated)?;
         self.append_audit(
             &header,
             &keys,
@@ -780,6 +855,32 @@ impl LocalVault {
         self.store
             .load_ticket(ticket_id)?
             .ok_or(VaultError::TicketNotFound)
+    }
+
+    fn active_policy_for_ticket(
+        &self,
+        ticket: &SecretAccessTicket,
+    ) -> Result<AccessPolicy, VaultError> {
+        self.store
+            .list_policies()?
+            .into_iter()
+            .find(|policy| policy.policy_id == ticket.policy_id)
+            .ok_or(VaultError::TicketPolicyChanged)
+    }
+
+    fn ensure_ticket_secret_is_current(
+        &self,
+        ticket: &SecretAccessTicket,
+    ) -> Result<(), VaultError> {
+        if ticket.secret_version == 0 {
+            return Ok(());
+        }
+        let latest = self.store.load_latest_secret(&ticket.secret_ref)?;
+        if latest.secret_version == ticket.secret_version && latest.status == SecretStatus::Active {
+            Ok(())
+        } else {
+            Err(VaultError::TicketSecretVersionStale)
+        }
     }
 
     pub fn start_rotation(
@@ -1033,6 +1134,43 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::policy::DeliveryMode;
+
+    fn allow_policy() -> AccessPolicy {
+        AccessPolicy {
+            policy_id: "p1".to_string(),
+            secret_refs: vec!["secret://service/api".to_string()],
+            allowed_consumers: vec!["cli".to_string()],
+            allowed_purposes: vec!["deploy".to_string()],
+            allowed_delivery_modes: vec![DeliveryMode::TerminalPrint],
+            exportable: true,
+            max_ticket_ttl_seconds: 60,
+            max_uses: 1,
+            ..serde_json::from_value(serde_json::json!({"policy_id":"defaults"})).unwrap()
+        }
+    }
+
+    fn access_request() -> AccessRequest {
+        AccessRequest {
+            secret_ref: "secret://service/api".to_string(),
+            consumer: "cli".to_string(),
+            purpose: "deploy".to_string(),
+            delivery_mode: DeliveryMode::TerminalPrint,
+            provider_assurance: "A1".to_string(),
+            raw_export_requested: true,
+            http_host: None,
+            http_scheme: None,
+            http_method: None,
+            http_path: None,
+            http_request_body_bytes: None,
+            os_uid: None,
+            executable_path: None,
+            executable_sha256: None,
+            mfa_verified: false,
+            broker_session_id: None,
+            now: Utc::now(),
+        }
+    }
 
     #[test]
     fn local_vault_initializes_and_round_trips_secret() {
@@ -1159,6 +1297,104 @@ mod tests {
                 .get_secret("secret://service/api", "passphrase")
                 .unwrap(),
             b"new-secret"
+        );
+    }
+
+    #[test]
+    fn ticket_consume_denies_replay_policy_change_and_stale_secret_version() {
+        let dir = tempdir().unwrap();
+        let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
+        vault.init("passphrase", "default").unwrap();
+        vault
+            .put_secret(
+                "secret://service/api",
+                b"old-secret",
+                "passphrase",
+                SecretType::ApiKey,
+            )
+            .unwrap();
+        vault.save_policy(allow_policy(), "passphrase").unwrap();
+        let request = access_request();
+        let ticket = vault
+            .issue_ticket(request.clone(), "passphrase")
+            .expect("ticket issued");
+
+        assert_eq!(
+            vault
+                .consume_ticket_for_secret(&ticket.ticket_id, request.clone(), "passphrase")
+                .unwrap(),
+            b"old-secret"
+        );
+        assert!(matches!(
+            vault.consume_ticket_for_secret(&ticket.ticket_id, request.clone(), "passphrase"),
+            Err(VaultError::Ticket(TicketValidationError::ReplayDenied))
+        ));
+
+        let mut changed_policy = allow_policy();
+        changed_policy.max_uses = 2;
+        vault.save_policy(changed_policy, "passphrase").unwrap();
+        let policy_changed_ticket = vault
+            .issue_ticket(request.clone(), "passphrase")
+            .expect("ticket issued");
+        let mut changed_again = allow_policy();
+        changed_again.max_ticket_ttl_seconds = 120;
+        vault.save_policy(changed_again, "passphrase").unwrap();
+        assert!(matches!(
+            vault.consume_ticket_for_secret(
+                &policy_changed_ticket.ticket_id,
+                request.clone(),
+                "passphrase"
+            ),
+            Err(VaultError::Ticket(
+                TicketValidationError::PolicyContextMismatch
+            ))
+        ));
+
+        vault.save_policy(allow_policy(), "passphrase").unwrap();
+        let stale_ticket = vault
+            .issue_ticket(request.clone(), "passphrase")
+            .expect("ticket issued");
+        vault
+            .put_secret(
+                "secret://service/api",
+                b"new-secret",
+                "passphrase",
+                SecretType::ApiKey,
+            )
+            .unwrap();
+        assert!(matches!(
+            vault.consume_ticket_for_secret(&stale_ticket.ticket_id, request, "passphrase"),
+            Err(VaultError::TicketSecretVersionStale)
+        ));
+    }
+
+    #[test]
+    fn ticket_renew_revokes_old_ticket_and_extends_authorization() {
+        let dir = tempdir().unwrap();
+        let vault = LocalVault::new(SQLiteVaultStore::new(dir.path().join("vault.db")));
+        vault.init("passphrase", "default").unwrap();
+        vault
+            .put_secret(
+                "secret://service/api",
+                b"sk-test",
+                "passphrase",
+                SecretType::ApiKey,
+            )
+            .unwrap();
+        vault.save_policy(allow_policy(), "passphrase").unwrap();
+        let request = access_request();
+        let ticket = vault.issue_ticket(request.clone(), "passphrase").unwrap();
+        let renewed = vault
+            .renew_ticket(&ticket.ticket_id, request.clone(), "passphrase")
+            .unwrap();
+
+        assert_ne!(ticket.ticket_id, renewed.ticket_id);
+        assert!(vault.load_ticket(&ticket.ticket_id).unwrap().revoked);
+        assert_eq!(
+            vault
+                .consume_ticket_for_secret(&renewed.ticket_id, request, "passphrase")
+                .unwrap(),
+            b"sk-test"
         );
     }
 

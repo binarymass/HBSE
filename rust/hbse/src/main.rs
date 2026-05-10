@@ -293,6 +293,56 @@ enum TicketCommand {
         #[arg(long)]
         passphrase: Option<String>,
     },
+    Validate {
+        ticket_id: String,
+        #[arg(long)]
+        consumer: String,
+        #[arg(long)]
+        purpose: String,
+        #[arg(long, default_value = "terminal_print")]
+        delivery_mode: String,
+        #[arg(long)]
+        raw_export_requested: bool,
+        #[arg(long)]
+        provider_assurance: Option<String>,
+        #[arg(long)]
+        http_host: Option<String>,
+        #[arg(long)]
+        http_scheme: Option<String>,
+        #[arg(long)]
+        http_method: Option<String>,
+        #[arg(long)]
+        http_path: Option<String>,
+        #[arg(long)]
+        http_request_body_bytes: Option<u64>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    Renew {
+        ticket_id: String,
+        #[arg(long)]
+        consumer: String,
+        #[arg(long)]
+        purpose: String,
+        #[arg(long, default_value = "terminal_print")]
+        delivery_mode: String,
+        #[arg(long)]
+        raw_export_requested: bool,
+        #[arg(long)]
+        provider_assurance: Option<String>,
+        #[arg(long)]
+        http_host: Option<String>,
+        #[arg(long)]
+        http_scheme: Option<String>,
+        #[arg(long)]
+        http_method: Option<String>,
+        #[arg(long)]
+        http_path: Option<String>,
+        #[arg(long)]
+        http_request_body_bytes: Option<u64>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
     Consume {
         ticket_id: String,
         #[arg(long)]
@@ -1010,6 +1060,74 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     println!("revoked ticket {}", ticket.ticket_id);
                 }
+            }
+            TicketCommand::Validate {
+                ticket_id,
+                consumer,
+                purpose,
+                delivery_mode,
+                raw_export_requested,
+                provider_assurance,
+                http_host,
+                http_scheme,
+                http_method,
+                http_path,
+                http_request_body_bytes,
+                passphrase,
+            } => {
+                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let ticket = vault.load_ticket(&ticket_id)?;
+                let request = build_access_request(
+                    ticket.secret_ref,
+                    consumer,
+                    purpose,
+                    &delivery_mode,
+                    raw_export_requested,
+                    provider_assurance,
+                    http_host,
+                    http_scheme,
+                    http_method,
+                    http_path,
+                    http_request_body_bytes,
+                )?;
+                let ticket = vault.validate_ticket(&ticket_id, request, &passphrase)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&ticket)?);
+                } else {
+                    println!("ticket {} valid", ticket.ticket_id);
+                }
+            }
+            TicketCommand::Renew {
+                ticket_id,
+                consumer,
+                purpose,
+                delivery_mode,
+                raw_export_requested,
+                provider_assurance,
+                http_host,
+                http_scheme,
+                http_method,
+                http_path,
+                http_request_body_bytes,
+                passphrase,
+            } => {
+                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let ticket = vault.load_ticket(&ticket_id)?;
+                let request = build_access_request(
+                    ticket.secret_ref,
+                    consumer,
+                    purpose,
+                    &delivery_mode,
+                    raw_export_requested,
+                    provider_assurance,
+                    http_host,
+                    http_scheme,
+                    http_method,
+                    http_path,
+                    http_request_body_bytes,
+                )?;
+                let ticket = vault.renew_ticket(&ticket_id, request, &passphrase)?;
+                println!("{}", serde_json::to_string_pretty(&ticket)?);
             }
             TicketCommand::Consume {
                 ticket_id,
@@ -1863,6 +1981,7 @@ fn build_access_request(
         executable_path: None,
         executable_sha256: None,
         mfa_verified: false,
+        broker_session_id: None,
         now: chrono::Utc::now(),
     })
 }
@@ -1926,6 +2045,7 @@ fn materialization_request(
         executable_path: None,
         executable_sha256: None,
         mfa_verified,
+        broker_session_id: None,
         now: chrono::Utc::now(),
     })
 }

@@ -199,6 +199,12 @@ message Ticket {
   uint32 max_uses = 11;
   uint32 uses_remaining = 12;
   bool revoked = 13;
+  string secret_id = 14;
+  uint32 secret_version = 15;
+  bool exportable = 16;
+  bool model_visible = 17;
+  bool shell_visible = 18;
+  string broker_session_id = 19;
 }
 
 message TicketRequest {
@@ -207,6 +213,24 @@ message TicketRequest {
 }
 
 message TicketConsumeRequest {
+  string ticket_id = 1;
+  string consumer = 2;
+  string purpose = 3;
+  DeliveryMode delivery_mode = 4;
+  string passphrase = 5;
+  bool raw_export_requested = 6;
+}
+
+message TicketValidateRequest {
+  string ticket_id = 1;
+  string consumer = 2;
+  string purpose = 3;
+  DeliveryMode delivery_mode = 4;
+  string passphrase = 5;
+  bool raw_export_requested = 6;
+}
+
+message TicketRenewRequest {
   string ticket_id = 1;
   string consumer = 2;
   string purpose = 3;
@@ -304,8 +328,9 @@ service RotationService {
 
 service TicketService {
   rpc Request(TicketIssueRequest) returns (Ticket);
-  rpc Validate(TicketRequest) returns (Ticket);
+  rpc Validate(TicketValidateRequest) returns (Ticket);
   rpc Consume(TicketConsumeRequest) returns (MaterializedSecret);
+  rpc Renew(TicketRenewRequest) returns (Ticket);
   rpc Revoke(TicketRequest) returns (Ticket);
 }
 

@@ -637,6 +637,8 @@ If likely raw secrets are detected, the scanner fails so the file can be correct
 
 ## Tickets
 
+Secret Access Tickets are short-lived authorization artifacts. They do not contain raw secrets, vault root key material, DEKs, or KEKs. Native tickets are MACed, scoped to a vault, secret reference, secret version, consumer, purpose, delivery mode, policy hash, and available local context such as OS user, executable identity, HTTP request context, and broker session.
+
 Issue a ticket:
 
 ```bash
@@ -654,11 +656,31 @@ hbse --vault vault.db ticket list
 hbse --vault vault.db ticket inspect <ticket-id>
 ```
 
+Validate a ticket without materializing the secret:
+
+```bash
+hbse --vault vault.db ticket validate <ticket-id> \
+  --consumer app-cli \
+  --purpose provider-call \
+  --delivery-mode child_env
+```
+
+Renew a valid ticket. Renewal issues a new ticket and revokes the old ticket:
+
+```bash
+hbse --vault vault.db ticket renew <ticket-id> \
+  --consumer app-cli \
+  --purpose provider-call \
+  --delivery-mode child_env
+```
+
 Revoke a ticket:
 
 ```bash
 hbse --vault vault.db ticket revoke <ticket-id>
 ```
+
+At consumption time HBSE re-validates the ticket MAC, expiration, revocation state, remaining uses, request context, active policy hash, and active secret version. If the policy changed incompatibly, the ticket is stale, or the secret has rotated to a newer active version, materialization is denied.
 
 Emergency lockdown revokes active tickets and records a critical audit event:
 
