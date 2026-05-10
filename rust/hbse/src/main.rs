@@ -13,6 +13,7 @@ use hbse::provider::PASSPHRASE_PROVIDER_ID;
 use hbse::provider_catalog::local_provider_catalog;
 use hbse::provider_system::{SystemFingerprintProvider, SYSTEM_FINGERPRINT_PROVIDER_ID};
 use hbse::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
+use hbse::provider_tpm2_esapi::{LinuxTpm2EsapiProvider, TPM2_ESAPI_PROVIDER_ID};
 use hbse::provider_yubikey::YubikeyPivProvider;
 use hbse::records::SecretType;
 use hbse::recovery::{generate_mnemonic_phrase, normalize_mnemonic_phrase, RecoveryPackage};
@@ -419,6 +420,10 @@ enum ProviderCommand {
         #[arg(long, default_value = "/dev/tpmrm0")]
         device: String,
     },
+    TestTpm2Direct {
+        #[arg(long, default_value = "/dev/tpmrm0")]
+        device: String,
+    },
     TestSystemFingerprint,
     TestYubikeyPiv,
     Enroll {
@@ -644,6 +649,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         vault.init_passphrase(&passphrase, namespace)?
                     }
                     "tpm2" => vault.init_tpm2(namespace, &tpm_device)?,
+                    "tpm2-direct" | "tpm2-esapi" => {
+                        vault.init_tpm2_esapi(namespace, &tpm_device)?
+                    }
                     "system-fingerprint" => vault.init_system_fingerprint(namespace)?,
                     _ => return Err(format!("unsupported provider: {provider}").into()),
                 };
@@ -1292,6 +1300,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(4);
                 }
             }
+            ProviderCommand::TestTpm2Direct { device } => {
+                let status = LinuxTpm2EsapiProvider::new(device).self_test()?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    println!("{}", status.detail);
+                }
+                if !status.available {
+                    std::process::exit(4);
+                }
+            }
             ProviderCommand::TestSystemFingerprint => {
                 let status = SystemFingerprintProvider::default().detect();
                 if cli.json {
@@ -1895,7 +1914,7 @@ fn unlock_passphrase(
         .get("provider_id")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    if provider_id == TPM2_PROVIDER_ID {
+    if provider_id == TPM2_PROVIDER_ID || provider_id == TPM2_ESAPI_PROVIDER_ID {
         return Ok(String::new());
     }
     if provider_id == SYSTEM_FINGERPRINT_PROVIDER_ID {

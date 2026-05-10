@@ -10,6 +10,7 @@ pub mod provider;
 pub mod provider_catalog;
 pub mod provider_system;
 pub mod provider_tpm2;
+pub mod provider_tpm2_esapi;
 pub mod provider_yubikey;
 pub mod records;
 pub mod recovery;

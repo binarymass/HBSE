@@ -22,6 +22,10 @@ use crate::provider_system::{
 use crate::provider_tpm2::{
     LinuxTpm2ToolsProvider, Tpm2ProviderBinding, Tpm2ProviderError, TPM2_PROVIDER_ID,
 };
+use crate::provider_tpm2_esapi::{
+    LinuxTpm2EsapiProvider, Tpm2EsapiProviderBinding, Tpm2EsapiProviderError,
+    TPM2_ESAPI_PROVIDER_ID,
+};
 use crate::records::{SecretRecord, SecretStatus, SecretType};
 use crate::recovery::{RecoveryError, RecoveryManager, RecoveryPackage};
 use crate::redaction::redaction_fingerprint;
@@ -42,6 +46,8 @@ pub enum VaultError {
     Provider(#[from] ProviderError),
     #[error("{0}")]
     Tpm2Provider(#[from] Tpm2ProviderError),
+    #[error("{0}")]
+    Tpm2EsapiProvider(#[from] Tpm2EsapiProviderError),
     #[error("{0}")]
     SystemFingerprintProvider(#[from] SystemFingerprintProviderError),
     #[error("{0}")]
@@ -179,6 +185,39 @@ impl LocalVault {
         Ok(header)
     }
 
+    pub fn init_tpm2_esapi(
+        &self,
+        namespace_id: impl Into<String>,
+        device_path: &str,
+    ) -> Result<VaultHeader, VaultError> {
+        let vault_id = Uuid::new_v4().to_string();
+        let namespace_id = namespace_id.into();
+        let root_key: [u8; KEY_SIZE] = random();
+        let binding =
+            LinuxTpm2EsapiProvider::new(device_path).wrap_root_key(&vault_id, &root_key)?;
+        let header = VaultHeader {
+            schema_version: crate::store::SCHEMA_VERSION,
+            vault_id: vault_id.clone(),
+            namespace_id,
+            provider_binding: serde_json::to_value(binding)?,
+            created_at: utc_millis(Utc::now()),
+        };
+        self.store.create_vault(&header)?;
+        let keys = KeyHierarchy::new(vault_id, &root_key)?;
+        self.append_audit(
+            &header,
+            &keys,
+            "vault.initialized",
+            "info",
+            "allow",
+            map_from_json(json!({
+                "provider_id": header.provider_binding.get("provider_id").and_then(|value| value.as_str()),
+                "assurance_level": header.provider_binding.get("assurance_level").and_then(|value| value.as_str()),
+            })),
+        )?;
+        Ok(header)
+    }
+
     pub fn init_system_fingerprint(
         &self,
         namespace_id: impl Into<String>,
@@ -233,6 +272,10 @@ impl LocalVault {
             }
             "tpm2" => serde_json::to_value(
                 LinuxTpm2ToolsProvider::new(tpm_device)
+                    .wrap_root_key(&header.vault_id, keys.root_key_bytes())?,
+            )?,
+            "tpm2-direct" | "tpm2-esapi" => serde_json::to_value(
+                LinuxTpm2EsapiProvider::new(tpm_device)
                     .wrap_root_key(&header.vault_id, keys.root_key_bytes())?,
             )?,
             "system-fingerprint" => serde_json::to_value(
@@ -310,6 +353,10 @@ impl LocalVault {
             }
             "tpm2" => serde_json::to_value(
                 LinuxTpm2ToolsProvider::new(tpm_device)
+                    .wrap_root_key(&header.vault_id, &root_key)?,
+            )?,
+            "tpm2-direct" | "tpm2-esapi" => serde_json::to_value(
+                LinuxTpm2EsapiProvider::new(tpm_device)
                     .wrap_root_key(&header.vault_id, &root_key)?,
             )?,
             "system-fingerprint" => serde_json::to_value(
@@ -1048,6 +1095,17 @@ impl LocalVault {
             let binding: Tpm2ProviderBinding =
                 serde_json::from_value(header.provider_binding.clone())?;
             LinuxTpm2ToolsProvider::new(
+                header
+                    .provider_binding
+                    .get("device_path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("/dev/tpmrm0"),
+            )
+            .unwrap_root_key(&binding)?
+        } else if provider_id == TPM2_ESAPI_PROVIDER_ID {
+            let binding: Tpm2EsapiProviderBinding =
+                serde_json::from_value(header.provider_binding.clone())?;
+            LinuxTpm2EsapiProvider::new(
                 header
                     .provider_binding
                     .get("device_path")

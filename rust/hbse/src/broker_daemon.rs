@@ -16,6 +16,7 @@ use crate::policy::{AccessRequest, DeliveryMode};
 use crate::provider::PASSPHRASE_PROVIDER_ID;
 use crate::provider_system::SYSTEM_FINGERPRINT_PROVIDER_ID;
 use crate::provider_tpm2::TPM2_PROVIDER_ID;
+use crate::provider_tpm2_esapi::TPM2_ESAPI_PROVIDER_ID;
 use crate::store::SQLiteVaultStore;
 use crate::vault::LocalVault;
 
@@ -403,7 +404,7 @@ fn validate_unlock(state: &BrokerState, passphrase: Option<&str>) -> Result<(), 
         vault.verify_audit(passphrase.unwrap_or(""))?;
         return Ok(());
     }
-    if provider_id == TPM2_PROVIDER_ID {
+    if provider_id == TPM2_PROVIDER_ID || provider_id == TPM2_ESAPI_PROVIDER_ID {
         vault.verify_audit("")?;
         return Ok(());
     }

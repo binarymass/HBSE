@@ -13,7 +13,7 @@ This repository contains:
 - Native Rust CLI: `hbse`.
 - Native Rust broker daemon: `hbse-broker`.
 - Python package with CLI, broker daemon, SDK modules, and REST API code.
-- Linux TPM2 provider support through `tpm2-tools`.
+- Linux TPM2 provider support through native TPM2-TSS ESAPI bindings, with a `tpm2-tools` fallback provider retained for compatibility.
 - System fingerprint provider support for machines without TPM hardware.
 - YubiKey/PIV provider detection for hardware-token readiness checks.
 - Passphrase provider fallback for systems without TPM hardware.
@@ -304,13 +304,27 @@ hbse --vault "$HBSE_TEST_VAULT" readiness check --verify-audit
 
 ## TPM2 Provider
 
-Check TPM availability:
+Check native TPM availability:
+
+```bash
+hbse provider test-tpm2-direct --device /dev/tpmrm0
+```
+
+Check TPM availability through the compatibility `tpm2-tools` bridge:
 
 ```bash
 hbse provider test-tpm2 --device /dev/tpmrm0
 ```
 
-Initialize a TPM-backed vault:
+Initialize a TPM-backed vault using native TPM2-TSS ESAPI bindings:
+
+```bash
+hbse --vault vault.db vault init \
+  --provider tpm2-direct \
+  --tpm-device /dev/tpmrm0
+```
+
+Initialize a TPM-backed vault using the compatibility `tpm2-tools` provider:
 
 ```bash
 hbse --vault vault.db vault init \
@@ -332,15 +346,18 @@ hbse --json provider list
 hbse provider detect
 ```
 
-`provider list` inventories the local provider surface. It reports whether each provider is available, whether it supports vault binding today, and whether it is hardware-backed. `provider detect` is retained as the TPM2-specific compatibility check.
+`provider list` inventories the local provider surface. It reports whether each provider is available, whether it supports vault binding today, and whether it is hardware-backed. `provider detect` is retained as the `tpm2-tools` compatibility check.
 
 Provider enrollment and rewrap:
 
 ```bash
 hbse --vault vault.db provider enroll passphrase --new-passphrase 'new local passphrase'
+hbse --vault vault.db provider enroll tpm2-direct --tpm-device /dev/tpmrm0
 hbse --vault vault.db provider enroll tpm2 --tpm-device /dev/tpmrm0
 hbse --vault vault.db provider enroll system-fingerprint
 ```
+
+The `tpm2-direct` provider stores the vault root key as a TPM sealed object using native TPM2-TSS ESAPI calls. It requires a Linux TPM resource manager device such as `/dev/tpmrm0` and the system TPM2-TSS libraries. The `tpm2` provider remains available for systems where the direct provider is not usable but `tpm2-tools` works.
 
 ## System Fingerprint Provider
 
@@ -398,6 +415,7 @@ Initialize:
 
 ```bash
 hbse --vault vault.db vault init --provider passphrase
+hbse --vault vault.db vault init --provider tpm2-direct --tpm-device /dev/tpmrm0
 hbse --vault vault.db vault init --provider tpm2 --tpm-device /dev/tpmrm0
 hbse --vault vault.db vault init --provider system-fingerprint
 ```
@@ -936,15 +954,16 @@ Initialize a vault or point `--vault`/`HBSE_VAULT_PATH` at the intended vault da
 
 Check that the policy covers the requested secret reference, consumer, purpose, delivery mode, provider assurance, and any broker HTTP or process identity constraints.
 
-`TPM device or tpm2-tools unavailable`
+`TPM device or provider unavailable`
 
 Run:
 
 ```bash
+hbse provider test-tpm2-direct --device /dev/tpmrm0
 hbse provider test-tpm2 --device /dev/tpmrm0
 ```
 
-Then verify permissions for the TPM resource manager device and that `tpm2-tools` is installed.
+Then verify permissions for the TPM resource manager device. The direct provider requires TPM2-TSS libraries; the compatibility provider requires `tpm2-tools`.
 
 `HBSE broker unavailable`
 
@@ -990,4 +1009,4 @@ rust/package-local.sh 0.1.0
 
 HBSE should not be represented as production-grade for high-sensitivity or external deployment until the appropriate production assurance gates pass and the release artifacts are verified.
 
-Current local functionality includes encrypted vault storage, passphrase, system fingerprint, and TPM2 providers, YubiKey/PIV readiness detection, local broker facilitation, dotenv reference workflows, policy-controlled command execution, audit verification, backup/recovery, rotation, systemd installation, and release evidence/signing. Remaining higher-assurance work includes full external hardware-token vault bindings such as YubiKey/PIV unwrap, broader cross-platform provider support, production gRPC serving, signed provider profiles, parser-aware redaction expansion, and external security review.
+Current local functionality includes encrypted vault storage, passphrase, system fingerprint, native TPM2-TSS, and TPM2 tools providers, YubiKey/PIV readiness detection, local broker facilitation, dotenv reference workflows, policy-controlled command execution, audit verification, backup/recovery, rotation, systemd installation, and release evidence/signing. Remaining higher-assurance work includes full external hardware-token vault bindings such as YubiKey/PIV unwrap, broader cross-platform provider support, production gRPC serving, signed provider profiles, parser-aware redaction expansion, and external security review.

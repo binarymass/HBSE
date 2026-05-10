@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use crate::provider::PASSPHRASE_PROVIDER_ID;
 use crate::provider_system::{SystemFingerprintProvider, SYSTEM_FINGERPRINT_PROVIDER_ID};
 use crate::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
+use crate::provider_tpm2_esapi::{LinuxTpm2EsapiProvider, TPM2_ESAPI_PROVIDER_ID};
 use crate::provider_yubikey::{YubikeyPivProvider, YUBIKEY_PIV_PROVIDER_ID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +22,7 @@ pub struct ProviderCatalogEntry {
 
 pub fn local_provider_catalog(tpm_device: &str) -> Vec<ProviderCatalogEntry> {
     let tpm2_status = LinuxTpm2ToolsProvider::new(tpm_device).detect();
+    let tpm2_esapi_status = LinuxTpm2EsapiProvider::new(tpm_device).detect();
     let system_status = SystemFingerprintProvider::default().detect();
     let yubikey_status = YubikeyPivProvider::detect();
 
@@ -43,8 +45,19 @@ pub fn local_provider_catalog(tpm_device: &str) -> Vec<ProviderCatalogEntry> {
             }),
         },
         ProviderCatalogEntry {
+            provider_id: TPM2_ESAPI_PROVIDER_ID.to_string(),
+            name: "Linux TPM2 Direct".to_string(),
+            assurance_level: "A2".to_string(),
+            hardware_backed: true,
+            vault_binding_supported: true,
+            available: tpm2_esapi_status.available,
+            detail: tpm2_esapi_status.detail.clone(),
+            warning: Some("Native TPM2-TSS ESAPI provider.".to_string()),
+            status: serde_json::to_value(tpm2_esapi_status).unwrap_or_else(|_| json!({})),
+        },
+        ProviderCatalogEntry {
             provider_id: TPM2_PROVIDER_ID.to_string(),
-            name: "Linux TPM2".to_string(),
+            name: "Linux TPM2 Tools".to_string(),
             assurance_level: "A2".to_string(),
             hardware_backed: true,
             vault_binding_supported: true,
@@ -97,6 +110,7 @@ mod tests {
             .collect();
         assert!(ids.contains(&PASSPHRASE_PROVIDER_ID));
         assert!(ids.contains(&TPM2_PROVIDER_ID));
+        assert!(ids.contains(&TPM2_ESAPI_PROVIDER_ID));
         assert!(ids.contains(&SYSTEM_FINGERPRINT_PROVIDER_ID));
         assert!(ids.contains(&YUBIKEY_PIV_PROVIDER_ID));
     }
