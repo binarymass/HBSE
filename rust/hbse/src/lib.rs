@@ -8,6 +8,7 @@ pub mod policy;
 pub mod provider;
 pub mod provider_system;
 pub mod provider_tpm2;
+pub mod provider_yubikey;
 pub mod records;
 pub mod recovery;
 pub mod redaction;

@@ -15,6 +15,7 @@ This repository contains:
 - Python package with CLI, broker daemon, SDK modules, and REST API code.
 - Linux TPM2 provider support through `tpm2-tools`.
 - System fingerprint provider support for machines without TPM hardware.
+- YubiKey/PIV provider detection for hardware-token readiness checks.
 - Passphrase provider fallback for systems without TPM hardware.
 - SQLite-backed encrypted local vault storage.
 - Policy, ticket, audit, backup, recovery, rotation, dotenv, release, readiness, and systemd support.
@@ -365,6 +366,25 @@ hbse --vault recovered.db vault recover \
 ```
 
 Because this binding depends on local system identity, motherboard replacement, VM cloning, OS machine-ID changes, or hardware inventory changes can prevent unlock. Keep a separate recovery package.
+
+## External Hardware Token Providers
+
+HBSE currently includes YubiKey/PIV readiness detection:
+
+```bash
+hbse provider test-yubikey-piv
+```
+
+This checks for common YubiKey/PIV tooling such as `ykman`, OpenSC `opensc-tool`/`pkcs11-tool`, or `piv-tool`, and reports whether a compatible token appears present. It does not yet wrap or unwrap the vault root key through a YubiKey/PIV private key.
+
+The intended production direction for this provider is:
+
+- generate or select a PIV key slot on the token;
+- wrap the vault root key to the token-backed public key;
+- require token presence and PIN/touch policy for unwrap;
+- store only public key identity and wrapped vault material in the HBSE vault header.
+
+Until that cryptographic path is implemented and tested against real hardware, use TPM2 for hardware-backed local binding or `system-fingerprint` for non-hardware copied-vault resistance.
 
 ## Vault Commands
 
@@ -885,4 +905,4 @@ rust/package-local.sh 0.1.0
 
 HBSE should not be represented as production-grade for high-sensitivity or external deployment until the appropriate production assurance gates pass and the release artifacts are verified.
 
-Current local functionality includes encrypted vault storage, passphrase, system fingerprint, and TPM2 providers, local broker facilitation, dotenv reference workflows, policy-controlled command execution, audit verification, backup/recovery, rotation, systemd installation, and release evidence/signing. Remaining higher-assurance work includes external hardware-token providers such as YubiKey/PIV, broader cross-platform provider support, production gRPC serving, signed provider profiles, parser-aware redaction expansion, and external security review.
+Current local functionality includes encrypted vault storage, passphrase, system fingerprint, and TPM2 providers, YubiKey/PIV readiness detection, local broker facilitation, dotenv reference workflows, policy-controlled command execution, audit verification, backup/recovery, rotation, systemd installation, and release evidence/signing. Remaining higher-assurance work includes full external hardware-token vault bindings such as YubiKey/PIV unwrap, broader cross-platform provider support, production gRPC serving, signed provider profiles, parser-aware redaction expansion, and external security review.

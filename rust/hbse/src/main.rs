@@ -12,6 +12,7 @@ use hbse::policy::{AccessPolicy, AccessRequest, DeliveryMode};
 use hbse::provider::PASSPHRASE_PROVIDER_ID;
 use hbse::provider_system::{SystemFingerprintProvider, SYSTEM_FINGERPRINT_PROVIDER_ID};
 use hbse::provider_tpm2::{LinuxTpm2ToolsProvider, TPM2_PROVIDER_ID};
+use hbse::provider_yubikey::YubikeyPivProvider;
 use hbse::records::SecretType;
 use hbse::recovery::RecoveryPackage;
 use hbse::release::{
@@ -354,6 +355,7 @@ enum ProviderCommand {
         device: String,
     },
     TestSystemFingerprint,
+    TestYubikeyPiv,
     Enroll {
         provider: String,
         #[arg(long)]
@@ -1082,6 +1084,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             ProviderCommand::TestSystemFingerprint => {
                 let status = SystemFingerprintProvider::default().detect();
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    println!("{}", status.detail);
+                }
+                if !status.available {
+                    std::process::exit(4);
+                }
+            }
+            ProviderCommand::TestYubikeyPiv => {
+                let status = YubikeyPivProvider::detect();
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 } else {
