@@ -22,4 +22,4 @@ Not included:
 - local environment files;
 - build output.
 
-Those omitted materials are intentionally ignored by `.gitignore`.
+.
