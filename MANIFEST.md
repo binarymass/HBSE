@@ -17,7 +17,6 @@ Not included:
 
 - working specification documents;
 - internal planning notes;
-- chat history;
 - generated release evidence;
 - local vault databases;
 - local environment files;
