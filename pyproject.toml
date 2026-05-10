@@ -7,7 +7,7 @@ name = "hbse"
 version = "0.1.0"
 description = "Hardware Bound Secrets Enclave cryptographic foundation"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "cryptography>=46.0.0",
