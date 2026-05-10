@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -299,6 +299,30 @@ impl SQLiteVaultStore {
             params![event.event_id, serde_json::to_string(event)?],
         )?;
         Ok(())
+    }
+
+    pub fn append_audit_event<F>(&self, build: F) -> Result<AuditEvent, StoreError>
+    where
+        F: FnOnce(Vec<AuditEvent>) -> AuditEvent,
+    {
+        self.initialize_schema()?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let events = {
+            let mut stmt = tx.prepare("SELECT event_json FROM audit_events ORDER BY sequence")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let raw = rows.collect::<Result<Vec<_>, _>>()?;
+            raw.into_iter()
+                .map(|value| serde_json::from_str(&value).map_err(StoreError::from))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let event = build(events);
+        tx.execute(
+            "INSERT INTO audit_events (event_id, event_json) VALUES (?, ?)",
+            params![event.event_id, serde_json::to_string(&event)?],
+        )?;
+        tx.commit()?;
+        Ok(event)
     }
 
     pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StoreError> {

@@ -1199,18 +1199,20 @@ impl LocalVault {
         decision: &str,
         metadata: Map<String, Value>,
     ) -> Result<AuditEvent, VaultError> {
-        let events = self.store.list_audit_events()?;
-        let mut manager = AuditManager::new(keys.audit_integrity_key(), events);
-        let event = manager.append(
-            &header.vault_id,
-            &header.namespace_id,
-            event_type,
-            severity,
-            decision,
-            metadata,
-        );
-        self.store.save_audit_event(&event)?;
-        Ok(event)
+        let mac_key = keys.audit_integrity_key();
+        let vault_id = header.vault_id.clone();
+        let namespace_id = header.namespace_id.clone();
+        Ok(self.store.append_audit_event(move |events| {
+            let mut manager = AuditManager::new(mac_key, events);
+            manager.append(
+                &vault_id,
+                &namespace_id,
+                event_type,
+                severity,
+                decision,
+                metadata,
+            )
+        })?)
     }
 }
 
