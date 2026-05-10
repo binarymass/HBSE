@@ -524,6 +524,15 @@ hbse --vault vault.db secret list
 hbse --vault vault.db secret inspect secret://app/api-key
 ```
 
+Resolve a `secret://` reference in a terminal:
+
+```bash
+hbse --vault vault.db resolve secret://app/api-key
+hbse resolve --broker --purpose provider-call secret://app/api-key
+```
+
+Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker.
+
 Disable a secret:
 
 ```bash

@@ -107,6 +107,23 @@ enum Command {
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
+    Resolve {
+        secret_ref: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        broker: bool,
+        #[arg(long, default_value_os_t = default_runtime_socket_path())]
+        socket: PathBuf,
+        #[arg(long, default_value = "cli")]
+        consumer: String,
+        #[arg(long, default_value = "terminal")]
+        purpose: String,
+        #[arg(long, default_value = "terminal_print")]
+        delivery_mode: String,
+        #[arg(long)]
+        raw_export_requested: bool,
+    },
     Doctor,
     Setup {
         #[arg(long, default_value = "/dev/tpmrm0")]
@@ -1881,6 +1898,50 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             drop(inherited_files);
             drop(temp_files);
             std::process::exit(exit_code);
+        }
+        Command::Resolve {
+            secret_ref,
+            passphrase,
+            broker,
+            socket,
+            consumer,
+            purpose,
+            delivery_mode,
+            raw_export_requested,
+        } => {
+            if !secret_ref.starts_with("secret://") {
+                return Err("resolve requires a secret:// reference".into());
+            }
+            if broker {
+                let response = broker_daemon::request(
+                    socket,
+                    &json!({
+                        "command": "materialize",
+                        "secret_ref": secret_ref,
+                        "consumer": consumer,
+                        "purpose": purpose,
+                        "delivery_mode": delivery_mode,
+                        "raw_export_requested": raw_export_requested,
+                    }),
+                )?;
+                if !response
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    print_broker_response(response)?;
+                    std::process::exit(6);
+                }
+                let secret = response
+                    .get("secret")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("broker response did not include a secret")?;
+                print!("{secret}");
+            } else {
+                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let plaintext = vault.get_secret(&secret_ref, &passphrase)?;
+                print!("{}", String::from_utf8_lossy(&plaintext));
+            }
         }
         Command::Doctor => {
             let report = doctor_report(&vault)?;
