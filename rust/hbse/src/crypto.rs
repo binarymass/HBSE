@@ -1,6 +1,6 @@
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rand::random;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -111,32 +111,8 @@ impl CryptoEngine {
             return Err(CryptoError::WrongVault);
         }
         let kdf_label = key_hierarchy.secret_kek_label(&record.secret_id, record.secret_version);
-        let secret_aad = secret_aad(
-            &record.vault_id,
-            &record.namespace_id,
-            &record.secret_id,
-            &record.secret_ref,
-            record.secret_version,
-            record.secret_type,
-            &record.policy_id,
-            &record.policy_hash,
-            &record.metadata_hash,
-            &record.created_at,
-        );
-        let wrap_aad = dek_wrap_aad(
-            &record.vault_id,
-            &record.secret_id,
-            record.secret_version,
-            &kdf_label,
-            &record.provider_policy_hash,
-            &record.created_at,
-        );
-        if hash_bytes(&secret_aad) != record.secret_aad_hash {
-            return Err(CryptoError::SecretAadHashMismatch);
-        }
-        if hash_bytes(&wrap_aad) != record.dek_wrap_aad_hash {
-            return Err(CryptoError::DekWrapAadHashMismatch);
-        }
+        let secret_aad = matching_secret_aad(record)?;
+        let wrap_aad = matching_dek_wrap_aad(record, &kdf_label)?;
         let kek = key_hierarchy.secret_kek(&record.secret_id, record.secret_version);
         let dek = decrypt_aes_gcm(
             &kek,
@@ -151,6 +127,55 @@ impl CryptoEngine {
             &secret_aad,
         )
     }
+}
+
+fn matching_secret_aad(record: &SecretRecord) -> Result<Vec<u8>, CryptoError> {
+    for created_at in created_at_aad_candidates(&record.created_at) {
+        let aad = secret_aad(
+            &record.vault_id,
+            &record.namespace_id,
+            &record.secret_id,
+            &record.secret_ref,
+            record.secret_version,
+            record.secret_type,
+            &record.policy_id,
+            &record.policy_hash,
+            &record.metadata_hash,
+            &created_at,
+        );
+        if hash_bytes(&aad) == record.secret_aad_hash {
+            return Ok(aad);
+        }
+    }
+    Err(CryptoError::SecretAadHashMismatch)
+}
+
+fn matching_dek_wrap_aad(record: &SecretRecord, kdf_label: &str) -> Result<Vec<u8>, CryptoError> {
+    for created_at in created_at_aad_candidates(&record.created_at) {
+        let aad = dek_wrap_aad(
+            &record.vault_id,
+            &record.secret_id,
+            record.secret_version,
+            kdf_label,
+            &record.provider_policy_hash,
+            &created_at,
+        );
+        if hash_bytes(&aad) == record.dek_wrap_aad_hash {
+            return Ok(aad);
+        }
+    }
+    Err(CryptoError::DekWrapAadHashMismatch)
+}
+
+fn created_at_aad_candidates(created_at: &str) -> Vec<String> {
+    let mut candidates = vec![created_at.to_string()];
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(created_at) {
+        let millis = utc_millis(timestamp.with_timezone(&Utc));
+        if millis != created_at {
+            candidates.push(millis);
+        }
+    }
+    candidates
 }
 
 pub fn hash_bytes(value: &[u8]) -> String {
@@ -307,6 +332,29 @@ mod tests {
             engine.decrypt_secret(&keys, &record),
             Err(CryptoError::SecretAadHashMismatch)
         ));
+    }
+
+    #[test]
+    fn python_created_microsecond_timestamp_records_decrypt() {
+        let engine = CryptoEngine;
+        let keys = KeyHierarchy::new("vault-1", &[0x11; 32]).unwrap();
+        let mut record = engine.encrypt_secret(
+            &keys,
+            "default",
+            "openai",
+            "secret://default/openai",
+            1,
+            b"sk-test",
+            SecretType::ApiKey,
+            "default-deny",
+            "policy-hash",
+            "metadata-hash",
+            "unbound-provider-policy",
+        );
+        let millisecond_created_at = record.created_at.clone();
+        record.created_at = millisecond_created_at.replace('Z', "456Z");
+
+        assert_eq!(engine.decrypt_secret(&keys, &record).unwrap(), b"sk-test");
     }
 
     #[test]
