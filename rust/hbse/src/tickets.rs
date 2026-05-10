@@ -251,6 +251,7 @@ mod tests {
             os_uid: None,
             executable_path: None,
             executable_sha256: None,
+            mfa_verified: false,
             now: Utc::now(),
         }
     }

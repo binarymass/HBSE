@@ -4,6 +4,7 @@ pub mod broker_daemon;
 pub mod crypto;
 pub mod dotenv;
 pub mod keys;
+pub mod mfa;
 pub mod policy;
 pub mod provider;
 pub mod provider_catalog;

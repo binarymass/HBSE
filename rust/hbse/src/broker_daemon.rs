@@ -13,6 +13,7 @@ use ureq::Agent;
 
 use crate::policy::{AccessRequest, DeliveryMode};
 use crate::provider::PASSPHRASE_PROVIDER_ID;
+use crate::provider_system::SYSTEM_FINGERPRINT_PROVIDER_ID;
 use crate::provider_tpm2::TPM2_PROVIDER_ID;
 use crate::store::SQLiteVaultStore;
 use crate::vault::LocalVault;
@@ -49,6 +50,7 @@ pub struct BrokerState {
     pub idle_timeout_seconds: f64,
     unlocked_passphrase: Option<String>,
     unlocked: bool,
+    mfa_verified: bool,
     last_activity: Option<SystemTime>,
 }
 
@@ -59,6 +61,7 @@ impl BrokerState {
             idle_timeout_seconds,
             unlocked_passphrase: None,
             unlocked: false,
+            mfa_verified: false,
             last_activity: None,
         }
     }
@@ -136,30 +139,47 @@ fn handle_connection(
         "status" => Ok(json!({
             "ok": true,
             "unlocked": state.unlocked,
+            "mfa_verified": state.mfa_verified,
             "idle_timeout_seconds": state.idle_timeout_seconds,
             "last_activity": state.last_activity.and_then(system_time_millis),
             "peer": peer,
         })),
         "unlock" => {
             validate_unlock(state, request.get("passphrase").and_then(Value::as_str))?;
+            state.mfa_verified = false;
             state.unlocked_passphrase = request
                 .get("passphrase")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            if let Some(code) = request.get("mfa_code").and_then(Value::as_str) {
+                if let Err(err) = validate_mfa(state, code) {
+                    state.unlocked_passphrase = None;
+                    return Err(err);
+                }
+                state.mfa_verified = true;
+            }
             state.unlocked = true;
             mark_activity(state);
-            Ok(json!({"ok": true, "unlocked": true}))
+            Ok(json!({"ok": true, "unlocked": true, "mfa_verified": state.mfa_verified}))
+        }
+        "mfa_verify" => {
+            require_unlocked(state)?;
+            validate_mfa(state, str_field(&request, "mfa_code")?)?;
+            state.mfa_verified = true;
+            mark_activity(state);
+            Ok(json!({"ok": true, "unlocked": true, "mfa_verified": true}))
         }
         "lock" => {
             state.unlocked_passphrase = None;
             state.unlocked = false;
+            state.mfa_verified = false;
             state.last_activity = None;
             Ok(json!({"ok": true, "unlocked": false}))
         }
         "checkout" => {
             require_unlocked(state)?;
             let vault = state.vault();
-            let access = access_request(&request, &peer, false)?;
+            let access = access_request(&request, &peer, false, state.mfa_verified)?;
             let ticket =
                 vault.issue_ticket(access, state.unlocked_passphrase.as_deref().unwrap_or(""))?;
             mark_activity(state);
@@ -175,6 +195,7 @@ fn handle_connection(
                     .get("raw_export_requested")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                state.mfa_verified,
             )?;
             let ticket = vault.issue_ticket(
                 access.clone(),
@@ -200,6 +221,7 @@ fn handle_connection(
                 state.unlocked_passphrase.as_deref().unwrap_or(""),
                 &request,
                 &peer,
+                state.mfa_verified,
             )?;
             mark_activity(state);
             Ok(json!({
@@ -228,6 +250,7 @@ fn brokered_http_request(
     passphrase: &str,
     request: &Value,
     peer: &PeerIdentity,
+    mfa_verified: bool,
 ) -> Result<BrokeredHttpResponse, BrokerError> {
     let url = str_field(request, "url")?;
     let method = request
@@ -266,6 +289,7 @@ fn brokered_http_request(
         os_uid: Some(peer.uid),
         executable_path: peer.exe_path.clone(),
         executable_sha256: peer.exe_sha256.clone(),
+        mfa_verified,
         now: chrono::Utc::now(),
     };
     let ticket = vault.issue_ticket(access.clone(), passphrase)?;
@@ -365,7 +389,17 @@ fn validate_unlock(state: &BrokerState, passphrase: Option<&str>) -> Result<(), 
         vault.verify_audit("")?;
         return Ok(());
     }
+    if provider_id == SYSTEM_FINGERPRINT_PROVIDER_ID {
+        vault.verify_audit("")?;
+        return Ok(());
+    }
     Err(BrokerError::UnsupportedProvider(provider_id.to_string()))
+}
+
+fn validate_mfa(state: &BrokerState, code: &str) -> Result<(), BrokerError> {
+    let vault = state.vault();
+    vault.verify_totp_mfa(state.unlocked_passphrase.as_deref().unwrap_or(""), code)?;
+    Ok(())
 }
 
 fn require_unlocked(state: &mut BrokerState) -> Result<(), BrokerError> {
@@ -394,6 +428,7 @@ fn expire_idle_unlock(state: &mut BrokerState) {
     {
         state.unlocked_passphrase = None;
         state.unlocked = false;
+        state.mfa_verified = false;
         state.last_activity = None;
     }
 }
@@ -402,6 +437,7 @@ fn access_request(
     value: &Value,
     peer: &PeerIdentity,
     raw_export_requested: bool,
+    mfa_verified: bool,
 ) -> Result<AccessRequest, BrokerError> {
     let delivery_mode = parse_delivery_mode(str_field(value, "delivery_mode")?)?;
     Ok(AccessRequest {
@@ -440,6 +476,7 @@ fn access_request(
         os_uid: Some(peer.uid),
         executable_path: peer.exe_path.clone(),
         executable_sha256: peer.exe_sha256.clone(),
+        mfa_verified,
         now: chrono::Utc::now(),
     })
 }

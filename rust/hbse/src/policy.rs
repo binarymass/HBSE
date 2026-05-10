@@ -67,6 +67,8 @@ pub struct AccessPolicy {
     #[serde(default = "default_minimum_provider_assurance")]
     pub minimum_provider_assurance: String,
     #[serde(default)]
+    pub require_mfa: bool,
+    #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
 }
 
@@ -98,6 +100,7 @@ pub struct AccessRequest {
     pub os_uid: Option<u32>,
     pub executable_path: Option<String>,
     pub executable_sha256: Option<String>,
+    pub mfa_verified: bool,
     pub now: DateTime<Utc>,
 }
 
@@ -241,6 +244,9 @@ impl PolicyEngine {
         {
             deny!("provider assurance too low");
         }
+        if policy.require_mfa && !request.mfa_verified {
+            deny!("MFA required");
+        }
         EvaluationResult {
             decision: PolicyDecision::Allow,
             reason: "allowed".to_string(),
@@ -363,6 +369,7 @@ mod tests {
             os_uid: None,
             executable_path: None,
             executable_sha256: None,
+            mfa_verified: false,
             now: Utc::now(),
         }
     }
@@ -390,5 +397,27 @@ mod tests {
         assert!(PolicyEngine::new(vec![policy])
             .evaluate(&request())
             .allowed());
+    }
+
+    #[test]
+    fn require_mfa_denies_until_request_is_verified() {
+        let policy = AccessPolicy {
+            policy_id: "p1".to_string(),
+            secret_refs: vec!["secret://default/api".to_string()],
+            allowed_consumers: vec!["cli".to_string()],
+            allowed_purposes: vec!["deploy".to_string()],
+            allowed_delivery_modes: vec![DeliveryMode::TerminalPrint],
+            exportable: true,
+            require_mfa: true,
+            ..serde_json::from_value(serde_json::json!({"policy_id":"defaults"})).unwrap()
+        };
+        let engine = PolicyEngine::new(vec![policy]);
+        let mut request = request();
+
+        let denied = engine.evaluate(&request);
+        assert_eq!(denied.decision, PolicyDecision::Deny);
+
+        request.mfa_verified = true;
+        assert!(engine.evaluate(&request).allowed());
     }
 }

@@ -68,6 +68,10 @@ enum Command {
         #[command(subcommand)]
         command: ProviderCommand,
     },
+    Mfa {
+        #[command(subcommand)]
+        command: MfaCommand,
+    },
     Broker {
         #[command(subcommand)]
         command: BrokerCommand,
@@ -95,6 +99,8 @@ enum Command {
         secret_stdin: Option<String>,
         #[arg(long = "env")]
         env: Vec<String>,
+        #[arg(long)]
+        mfa_code: Option<String>,
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -373,6 +379,24 @@ enum ProviderCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum MfaCommand {
+    EnrollTotp {
+        #[arg(long, default_value = "HBSE")]
+        issuer: String,
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    VerifyTotp {
+        code: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
 enum BrokerCommand {
     Status {
         #[arg(long)]
@@ -383,6 +407,13 @@ enum BrokerCommand {
         socket: PathBuf,
         #[arg(long)]
         passphrase: Option<String>,
+        #[arg(long)]
+        mfa_code: Option<String>,
+    },
+    MfaVerify {
+        #[arg(long)]
+        socket: PathBuf,
+        code: String,
     },
     Lock {
         #[arg(long)]
@@ -1152,6 +1183,55 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 print_vault_status(&header, cli.json)?;
             }
         },
+        Command::Mfa { command } => match command {
+            MfaCommand::EnrollTotp {
+                issuer,
+                account,
+                passphrase,
+            } => {
+                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                let account = account.unwrap_or_else(|| {
+                    vault
+                        .status()
+                        .map(|header| header.namespace_id)
+                        .unwrap_or_else(|_| "local-vault".to_string())
+                });
+                let enrollment = vault.enroll_totp_mfa(&passphrase, &issuer, &account)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&enrollment)?);
+                } else {
+                    println!("TOTP MFA enrolled");
+                    println!("issuer: {}", enrollment.issuer);
+                    println!("account: {}", enrollment.account);
+                    println!("secret_base32: {}", enrollment.secret_base32);
+                    println!("otpauth_uri: {}", enrollment.otpauth_uri);
+                }
+            }
+            MfaCommand::VerifyTotp { code, passphrase } => {
+                let passphrase = unlock_passphrase(&vault, passphrase)?;
+                vault.verify_totp_mfa(&passphrase, &code)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&json!({"ok": true}))?);
+                } else {
+                    println!("TOTP MFA verified");
+                }
+            }
+            MfaCommand::Status => {
+                let enrolled = vault.totp_mfa_enrolled()?;
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "totp_enrolled": enrolled,
+                        }))?
+                    );
+                } else if enrolled {
+                    println!("TOTP MFA enrolled");
+                } else {
+                    println!("TOTP MFA not enrolled");
+                }
+            }
+        },
         Command::Broker { command } => match command {
             BrokerCommand::Status { socket } => {
                 print_broker_response(broker_daemon::request(
@@ -1159,15 +1239,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &json!({"command": "status"}),
                 )?)?;
             }
-            BrokerCommand::Unlock { socket, passphrase } => {
+            BrokerCommand::Unlock {
+                socket,
+                passphrase,
+                mfa_code,
+            } => {
                 let response = broker_daemon::request(
                     socket,
                     &json!({
                         "command": "unlock",
                         "passphrase": passphrase.or_else(|| env::var("HBSE_PASSPHRASE").ok()),
+                        "mfa_code": mfa_code,
                     }),
                 )?;
                 print_broker_response(response)?;
+            }
+            BrokerCommand::MfaVerify { socket, code } => {
+                print_broker_response(broker_daemon::request(
+                    socket,
+                    &json!({
+                        "command": "mfa_verify",
+                        "mfa_code": code,
+                    }),
+                )?)?;
             }
             BrokerCommand::Lock { socket } => {
                 print_broker_response(broker_daemon::request(
@@ -1333,6 +1427,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         &consumer,
                         &purpose,
                         DeliveryMode::ChildEnv,
+                        false,
                     )?;
                     let ticket = vault.issue_ticket(request.clone(), &passphrase)?;
                     let secret =
@@ -1415,6 +1510,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             secret_fd_env,
             secret_stdin,
             env,
+            mfa_code,
             command,
         } => {
             let command = strip_separator(command);
@@ -1422,6 +1518,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("use hbse run --purpose <purpose> -- <command>".into());
             }
             let passphrase = unlock_passphrase(&vault, None)?;
+            let mfa_verified = if let Some(code) = mfa_code {
+                vault.verify_totp_mfa(&passphrase, &code)?;
+                true
+            } else {
+                false
+            };
             let mut child_env = parse_env_assignments(env)?;
             for (env_name, secret_ref) in parse_env_assignments(secret_env)? {
                 if !secret_ref.starts_with("secret://") {
@@ -1436,6 +1538,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &consumer,
                     &purpose,
                     DeliveryMode::ChildEnv,
+                    mfa_verified,
                 )?;
                 let ticket = vault.issue_ticket(request.clone(), &passphrase)?;
                 let secret =
@@ -1457,6 +1560,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &consumer,
                     &purpose,
                     DeliveryMode::TempFile,
+                    mfa_verified,
                 )?;
                 let ticket = vault.issue_ticket(request.clone(), &passphrase)?;
                 let secret =
@@ -1487,6 +1591,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &consumer,
                     &purpose,
                     DeliveryMode::Fd,
+                    mfa_verified,
                 )?;
                 let ticket = vault.issue_ticket(request.clone(), &passphrase)?;
                 let secret =
@@ -1521,6 +1626,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &consumer,
                     &purpose,
                     DeliveryMode::Pipe,
+                    mfa_verified,
                 )?;
                 let ticket = vault.issue_ticket(request.clone(), &passphrase)?;
                 Some(vault.consume_ticket_for_secret(&ticket.ticket_id, request, &passphrase)?)
@@ -1756,6 +1862,7 @@ fn build_access_request(
         os_uid: None,
         executable_path: None,
         executable_sha256: None,
+        mfa_verified: false,
         now: chrono::Utc::now(),
     })
 }
@@ -1801,6 +1908,7 @@ fn materialization_request(
     consumer: &str,
     purpose: &str,
     delivery_mode: DeliveryMode,
+    mfa_verified: bool,
 ) -> Result<AccessRequest, Box<dyn std::error::Error>> {
     Ok(AccessRequest {
         secret_ref,
@@ -1817,6 +1925,7 @@ fn materialization_request(
         os_uid: None,
         executable_path: None,
         executable_sha256: None,
+        mfa_verified,
         now: chrono::Utc::now(),
     })
 }

@@ -8,6 +8,9 @@ use uuid::Uuid;
 use crate::audit::{verify_audit_chain, AuditEvent, AuditManager, AuditVerificationError};
 use crate::crypto::{hash_bytes, CryptoEngine, CryptoError};
 use crate::keys::{KeyError, KeyHierarchy, KEY_SIZE};
+use crate::mfa::{
+    new_totp_config, verify_totp_code, MfaError, TotpConfig, TotpEnrollment, TOTP_SECRET_REF,
+};
 use crate::policy::{AccessPolicy, AccessRequest, PolicyDecision, PolicyEngine};
 use crate::provider::{
     PassphraseProvider, PassphraseProviderBinding, ProviderError, PASSPHRASE_PROVIDER_ID,
@@ -48,6 +51,8 @@ pub enum VaultError {
     #[error("{0}")]
     Keys(#[from] KeyError),
     #[error("{0}")]
+    Mfa(#[from] MfaError),
+    #[error("{0}")]
     Audit(#[from] AuditVerificationError),
     #[error("{0}")]
     Ticket(#[from] TicketValidationError),
@@ -73,6 +78,10 @@ pub enum VaultError {
     NewPassphraseRequired,
     #[error("recovery package belongs to a different vault")]
     RecoveryPackageVaultMismatch,
+    #[error("TOTP MFA is not enrolled")]
+    MfaNotEnrolled,
+    #[error("invalid TOTP MFA code")]
+    MfaInvalidCode,
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +407,97 @@ impl LocalVault {
 
     pub fn list_secrets(&self) -> Result<Vec<SecretSummary>, VaultError> {
         Ok(self.store.list_secrets()?)
+    }
+
+    pub fn enroll_totp_mfa(
+        &self,
+        passphrase: &str,
+        issuer: &str,
+        account: &str,
+    ) -> Result<TotpEnrollment, VaultError> {
+        let (header, keys) = self.unlock(Some(passphrase))?;
+        let config = new_totp_config(issuer, account);
+        let version = self.store.latest_version(TOTP_SECRET_REF)?.unwrap_or(0) + 1;
+        let plaintext = serde_json::to_vec(&config)?;
+        let record = self.crypto.encrypt_secret(
+            &keys,
+            &header.namespace_id,
+            &secret_id_from_ref(TOTP_SECRET_REF)?,
+            TOTP_SECRET_REF,
+            version,
+            &plaintext,
+            SecretType::Token,
+            DEFAULT_POLICY_ID,
+            DEFAULT_POLICY_HASH,
+            &hash_bytes(TOTP_SECRET_REF.as_bytes()),
+            DEFAULT_PROVIDER_POLICY_HASH,
+        );
+        self.store.save_secret_record(&record)?;
+        self.append_audit(
+            &header,
+            &keys,
+            "mfa.totp_enrolled",
+            "high",
+            "allow",
+            map_from_json(json!({
+                "issuer": issuer,
+                "account": account,
+                "digits": config.digits,
+                "period_seconds": config.period_seconds,
+            })),
+        )?;
+        Ok(config.enrollment())
+    }
+
+    pub fn totp_mfa_enrolled(&self) -> Result<bool, VaultError> {
+        match self.store.load_latest_secret(TOTP_SECRET_REF) {
+            Ok(record) => Ok(record.status == SecretStatus::Active),
+            Err(StoreError::SecretNotFound(_)) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn verify_totp_mfa(&self, passphrase: &str, code: &str) -> Result<(), VaultError> {
+        let (header, keys) = self.unlock(Some(passphrase))?;
+        let record = match self.store.load_latest_secret(TOTP_SECRET_REF) {
+            Ok(record) => record,
+            Err(StoreError::SecretNotFound(_)) => return Err(VaultError::MfaNotEnrolled),
+            Err(err) => return Err(err.into()),
+        };
+        if record.status != SecretStatus::Active {
+            return Err(VaultError::MfaNotEnrolled);
+        }
+        let plaintext = self.crypto.decrypt_secret(&keys, &record)?;
+        let config: TotpConfig = serde_json::from_slice(&plaintext)?;
+        let now = Utc::now().timestamp().max(0) as u64;
+        if verify_totp_code(&config, code, now, 1)? {
+            self.append_audit(
+                &header,
+                &keys,
+                "mfa.totp_verified",
+                "info",
+                "allow",
+                map_from_json(json!({
+                    "issuer": config.issuer,
+                    "account": config.account,
+                })),
+            )?;
+            Ok(())
+        } else {
+            self.append_audit(
+                &header,
+                &keys,
+                "mfa.totp_denied",
+                "high",
+                "deny",
+                map_from_json(json!({
+                    "issuer": config.issuer,
+                    "account": config.account,
+                    "reason": "invalid code",
+                })),
+            )?;
+            Err(VaultError::MfaInvalidCode)
+        }
     }
 
     pub fn load_latest_secret(&self, secret_ref: &str) -> Result<SecretRecord, VaultError> {

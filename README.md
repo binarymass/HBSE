@@ -17,6 +17,7 @@ This repository contains:
 - System fingerprint provider support for machines without TPM hardware.
 - YubiKey/PIV provider detection for hardware-token readiness checks.
 - Passphrase provider fallback for systems without TPM hardware.
+- TOTP MFA step-up support for authenticator apps.
 - SQLite-backed encrypted local vault storage.
 - Policy, ticket, audit, backup, recovery, rotation, dotenv, release, readiness, and systemd support.
 - Versioned protobuf contract under `proto/`.
@@ -31,6 +32,7 @@ The native local implementation is the primary runtime path. The Python package 
 - Per-secret random data encryption keys.
 - Vault root key protection by TPM2, system fingerprint, or passphrase.
 - Policy-controlled secret access by consumer, purpose, and delivery mode.
+- Optional policy-level TOTP MFA requirement.
 - Short-lived Secret Access Tickets.
 - Local broker daemon for same-machine tools and services.
 - Dotenv compatibility using `secret://` references.
@@ -486,10 +488,13 @@ Example policy:
   "allowed_purposes": ["provider-call"],
   "allowed_delivery_modes": ["child_env", "brokered_http"],
   "minimum_provider_assurance": "A0",
+  "require_mfa": false,
   "max_ticket_ttl_seconds": 60,
   "max_uses": 1
 }
 ```
+
+Set `"require_mfa": true` to require a verified authenticator-app TOTP code before the policy can issue tickets or materialize secrets.
 
 Install a policy:
 
@@ -525,6 +530,30 @@ hbse --vault vault.db policy test \
   --delivery-mode child_env
 ```
 
+## MFA
+
+HBSE supports TOTP MFA for authenticator apps such as Microsoft Authenticator, Google Authenticator, 1Password, or compatible TOTP clients. MFA is a step-up gate for policy and broker use; it is not a vault root-key provider.
+
+Enroll TOTP:
+
+```bash
+hbse --vault vault.db mfa enroll-totp --issuer HBSE --account workstation
+```
+
+The enrollment output includes an `otpauth://` URI and Base32 seed. Add it to the authenticator app immediately. HBSE stores the TOTP seed encrypted inside the vault, not as clear database metadata.
+
+Verify a code:
+
+```bash
+hbse --vault vault.db mfa verify-totp 123456
+```
+
+Check enrollment status:
+
+```bash
+hbse --vault vault.db mfa status
+```
+
 ## Running Commands With Secrets
 
 Deliver a secret as an environment variable:
@@ -533,6 +562,7 @@ Deliver a secret as an environment variable:
 hbse --vault vault.db run \
   --consumer app-cli \
   --purpose provider-call \
+  --mfa-code 123456 \
   --secret-env API_KEY=secret://app/api-key \
   -- ./app
 ```
@@ -653,7 +683,14 @@ Unlock and inspect:
 
 ```bash
 hbse broker unlock --socket /tmp/hbse.sock
+hbse broker mfa-verify --socket /tmp/hbse.sock 123456
 hbse broker status --socket /tmp/hbse.sock
+```
+
+You can also supply the MFA code during unlock:
+
+```bash
+hbse broker unlock --socket /tmp/hbse.sock --mfa-code 123456
 ```
 
 Request a checkout ticket:
