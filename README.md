@@ -833,6 +833,30 @@ hbse broker provider-http \
   --url https://api.openai.com/v1/models
 ```
 
+For tools that cannot be modified to speak HBSE's Unix socket protocol, start the broker with an OpenAI-compatible local HTTP gateway:
+
+```bash
+hbse-broker \
+  --vault "$HOME/.local/share/hbse/vault.db" \
+  --socket "$XDG_RUNTIME_DIR/hbse/broker.sock" \
+  --idle-timeout-seconds 900 \
+  --http-listen 127.0.0.1:8787 \
+  --http-upstream-base-url https://api.openai.com/v1 \
+  --http-secret-ref secret://vegvisir/providers/openai/default \
+  --http-consumer vegvisir.provider.openai-hbse \
+  --http-purpose model.chat \
+  --http-model-discovery-purpose model.discovery
+```
+
+Then configure the unmodified tool as if it were using an OpenAI-compatible endpoint:
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+export OPENAI_API_KEY=hbse-placeholder
+```
+
+The placeholder API key is ignored by HBSE. The gateway strips client `Authorization`, asks the unlocked broker to perform `provider_http`, injects the real credential only into the upstream request, and returns the upstream response. Policies must allow `brokered_http` for the configured consumer, purpose, host, method, and path. The gateway is intended for local loopback use; bind it to `127.0.0.1`, not a public interface.
+
 Lock the broker:
 
 ```bash

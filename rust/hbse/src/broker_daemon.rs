@@ -1,8 +1,11 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +60,20 @@ pub struct BrokerState {
     last_activity: Option<SystemTime>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpGatewayConfig {
+    pub listen: String,
+    pub upstream_base_url: String,
+    pub secret_ref: String,
+    pub consumer: String,
+    pub purpose: String,
+    pub model_discovery_purpose: String,
+    pub credential_header: String,
+    pub credential_prefix: String,
+    pub timeout_seconds: f64,
+    pub max_response_bytes: u64,
+}
+
 impl BrokerState {
     pub fn new(vault_path: impl AsRef<Path>, idle_timeout_seconds: f64) -> Self {
         Self {
@@ -90,6 +107,15 @@ pub fn serve(
     socket_path: impl AsRef<Path>,
     idle_timeout_seconds: f64,
 ) -> Result<(), BrokerError> {
+    serve_with_http_gateway(vault_path, socket_path, idle_timeout_seconds, None)
+}
+
+pub fn serve_with_http_gateway(
+    vault_path: impl AsRef<Path>,
+    socket_path: impl AsRef<Path>,
+    idle_timeout_seconds: f64,
+    http_gateway: Option<HttpGatewayConfig>,
+) -> Result<(), BrokerError> {
     let socket_path = socket_path.as_ref();
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
@@ -99,9 +125,24 @@ pub fn serve(
     }
     let listener = UnixListener::bind(socket_path)?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
-    let mut state = BrokerState::new(vault_path, idle_timeout_seconds);
+    let state = Arc::new(Mutex::new(BrokerState::new(
+        vault_path,
+        idle_timeout_seconds,
+    )));
+    if let Some(config) = http_gateway {
+        let http_listener = TcpListener::bind(&config.listen)?;
+        let http_state = Arc::clone(&state);
+        thread::spawn(move || {
+            if let Err(err) = serve_http_gateway(http_listener, http_state, config) {
+                eprintln!("HBSE HTTP gateway stopped: {err}");
+            }
+        });
+    }
     for stream in listener.incoming() {
         let mut stream = stream?;
+        let mut state = state
+            .lock()
+            .map_err(|_| BrokerError::Http("broker state lock poisoned".to_string()))?;
         let response = match handle_connection(&mut stream, &mut state) {
             Ok(value) => value,
             Err(err) => json!({
@@ -390,6 +431,246 @@ fn brokered_http_request(
         body,
         redacted: headers_changed || body_changed,
     })
+}
+
+fn serve_http_gateway(
+    listener: TcpListener,
+    state: Arc<Mutex<BrokerState>>,
+    config: HttpGatewayConfig,
+) -> Result<(), BrokerError> {
+    for stream in listener.incoming() {
+        let mut stream = stream?;
+        let response = match handle_http_gateway_connection(&mut stream, &state, &config) {
+            Ok(response) => response,
+            Err(err) => HttpGatewayResponse {
+                status_code: match err {
+                    BrokerError::Locked => 423,
+                    BrokerError::Vault(_) => 403,
+                    BrokerError::RequestContainsSecret => 400,
+                    BrokerError::ResponseTooLarge => 502,
+                    _ => 500,
+                },
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: serde_json::to_vec(&json!({
+                    "error": {
+                        "message": err.to_string(),
+                        "type": "hbse_gateway_error",
+                    }
+                }))?,
+            },
+        };
+        write_http_gateway_response(&mut stream, response)?;
+    }
+    Ok(())
+}
+
+fn handle_http_gateway_connection(
+    stream: &mut TcpStream,
+    state: &Arc<Mutex<BrokerState>>,
+    config: &HttpGatewayConfig,
+) -> Result<HttpGatewayResponse, BrokerError> {
+    let request = read_http_gateway_request(stream)?;
+    if request.method == "GET" && request.path == "/health" {
+        return Ok(HttpGatewayResponse {
+            status_code: 200,
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: serde_json::to_vec(&json!({"ok": true}))?,
+        });
+    }
+    if !request.path.starts_with("/v1/") {
+        return Ok(HttpGatewayResponse {
+            status_code: 404,
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: serde_json::to_vec(&json!({
+                "error": {
+                    "message": "HBSE HTTP gateway only proxies /v1/* paths",
+                    "type": "not_found",
+                }
+            }))?,
+        });
+    }
+    let mut state = state
+        .lock()
+        .map_err(|_| BrokerError::Http("broker state lock poisoned".to_string()))?;
+    require_unlocked(&mut state)?;
+    let peer = http_gateway_peer_identity();
+    let vault = state.vault();
+    let upstream_url = http_gateway_upstream_url(&config.upstream_base_url, &request.path);
+    let purpose = if request.path.starts_with("/v1/models") {
+        &config.model_discovery_purpose
+    } else {
+        &config.purpose
+    };
+    let broker_request = json!({
+        "command": "provider_http",
+        "secret_ref": config.secret_ref,
+        "consumer": config.consumer,
+        "purpose": purpose,
+        "method": request.method,
+        "url": upstream_url,
+        "headers": request.forward_headers,
+        "body": request.body,
+        "credential_header": config.credential_header,
+        "credential_prefix": config.credential_prefix,
+        "timeout_seconds": config.timeout_seconds,
+        "max_response_bytes": config.max_response_bytes,
+    });
+    let response = brokered_http_request(
+        &vault,
+        state.unlocked_passphrase.as_deref().unwrap_or(""),
+        &broker_request,
+        &peer,
+        state.mfa_verified,
+        state.broker_session_id.clone(),
+    )?;
+    mark_activity(&mut state);
+    let headers = response
+        .headers
+        .into_iter()
+        .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_string())))
+        .filter(|(key, _)| {
+            !matches!(
+                key.to_ascii_lowercase().as_str(),
+                "content-length" | "transfer-encoding" | "connection"
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(HttpGatewayResponse {
+        status_code: response.status_code,
+        headers,
+        body: response.body.into_bytes(),
+    })
+}
+
+struct HttpGatewayRequest {
+    method: String,
+    path: String,
+    forward_headers: serde_json::Map<String, Value>,
+    body: Option<String>,
+}
+
+struct HttpGatewayResponse {
+    status_code: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+fn read_http_gateway_request(stream: &TcpStream) -> Result<HttpGatewayRequest, BrokerError> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or(BrokerError::MissingField("http_method"))?
+        .to_ascii_uppercase();
+    let path = parts
+        .next()
+        .ok_or(BrokerError::MissingField("http_path"))?
+        .to_string();
+    let mut headers = serde_json::Map::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        let Some((name, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse::<usize>().unwrap_or(0);
+            continue;
+        }
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "authorization" | "host" | "connection" | "transfer-encoding"
+        ) {
+            continue;
+        }
+        headers.insert(name.to_string(), Value::String(value.to_string()));
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    Ok(HttpGatewayRequest {
+        method,
+        path,
+        forward_headers: headers,
+        body: if body.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&body).to_string())
+        },
+    })
+}
+
+fn write_http_gateway_response(
+    stream: &mut TcpStream,
+    response: HttpGatewayResponse,
+) -> Result<(), BrokerError> {
+    let reason = http_reason(response.status_code);
+    write!(stream, "HTTP/1.1 {} {}\r\n", response.status_code, reason)?;
+    let has_content_type = response
+        .headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("content-type"));
+    for (key, value) in response.headers {
+        write!(stream, "{key}: {value}\r\n")?;
+    }
+    if !has_content_type {
+        write!(stream, "Content-Type: application/json\r\n")?;
+    }
+    write!(
+        stream,
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        response.body.len()
+    )?;
+    stream.write_all(&response.body)?;
+    Ok(())
+}
+
+fn http_reason(status_code: u16) -> &'static str {
+    match status_code {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        423 => "Locked",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        _ => "OK",
+    }
+}
+
+fn http_gateway_upstream_url(base_url: &str, request_path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") && request_path.starts_with("/v1/") {
+        format!("{}{}", base, request_path.trim_start_matches("/v1"))
+    } else {
+        format!("{base}{request_path}")
+    }
+}
+
+fn http_gateway_peer_identity() -> PeerIdentity {
+    PeerIdentity {
+        pid: std::process::id() as i32,
+        uid: unsafe { libc::geteuid() },
+        gid: unsafe { libc::getegid() },
+        exe_path: std::env::current_exe()
+            .ok()
+            .and_then(|path| path.to_str().map(ToString::to_string)),
+        comm: Some("hbse-http-gateway".to_string()),
+        exe_sha256: std::env::current_exe()
+            .ok()
+            .and_then(|path| fs::read(path).ok())
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+    }
 }
 
 fn validate_unlock(state: &BrokerState, passphrase: Option<&str>) -> Result<(), BrokerError> {
@@ -735,5 +1016,17 @@ mod tests {
         let (redacted, changed) = redact_known_secret("token=sk test", secret);
         assert!(changed);
         assert_eq!(redacted, "token=[REDACTED:hbse-secret]");
+    }
+
+    #[test]
+    fn http_gateway_maps_openai_compatible_v1_paths() {
+        assert_eq!(
+            http_gateway_upstream_url("https://api.openai.com/v1", "/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            http_gateway_upstream_url("https://api.openai.com", "/v1/models"),
+            "https://api.openai.com/v1/models"
+        );
     }
 }
