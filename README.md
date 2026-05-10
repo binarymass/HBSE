@@ -527,11 +527,11 @@ hbse --vault vault.db secret inspect secret://app/api-key
 Resolve a `secret://` reference in a terminal:
 
 ```bash
-hbse --vault vault.db resolve secret://app/api-key
-hbse resolve --broker --purpose provider-call secret://app/api-key
+hbse --vault vault.db resolve --allow-plaintext secret://app/api-key
+hbse resolve --broker --allow-plaintext --purpose provider-call secret://app/api-key
 ```
 
-Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker.
+Plain shell commands such as `echo secret://app/api-key` print the reference literally. Shells do not resolve HBSE URI references unless you run them through `hbse resolve`, `hbse run`, `hbse dotenv run`, or the broker. Commands that print plaintext require `--allow-plaintext`; broker-backed resolution also requires policy export permission.
 
 Disable a secret:
 
@@ -547,7 +547,7 @@ hbse --vault vault.db secret destroy \
   secret://app/api-key
 ```
 
-Raw secret retrieval is intentionally constrained. Prefer `hbse run`, broker materialization, or provider HTTP instead of printing raw secrets.
+Raw secret retrieval is intentionally constrained. `hbse secret get` and `hbse resolve` require `--allow-plaintext`. Prefer `hbse run`, broker materialization, or provider HTTP instead of printing raw secrets.
 
 ## Policy Commands
 
@@ -808,7 +808,8 @@ Materialize through the broker:
 hbse broker materialize \
   --socket /tmp/hbse.sock \
   --secret-ref secret://app/api-key \
-  --purpose provider-call
+  --purpose provider-call \
+  --allow-plaintext
 ```
 
 Provider HTTP facilitation injects the credential internally and redacts HBSE-managed secret material from returned response data:

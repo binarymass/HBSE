@@ -122,7 +122,7 @@ enum Command {
         #[arg(long, default_value = "terminal_print")]
         delivery_mode: String,
         #[arg(long)]
-        raw_export_requested: bool,
+        allow_plaintext: bool,
     },
     Doctor,
     Setup {
@@ -208,6 +208,8 @@ enum SecretCommand {
         secret_ref: String,
         #[arg(long)]
         passphrase: Option<String>,
+        #[arg(long)]
+        allow_plaintext: bool,
     },
     Inspect {
         secret_ref: String,
@@ -532,7 +534,7 @@ enum BrokerCommand {
         #[arg(long, default_value = "terminal_print")]
         delivery_mode: String,
         #[arg(long)]
-        raw_export_requested: bool,
+        allow_plaintext: bool,
     },
     ProviderHttp {
         #[arg(long, default_value_os_t = default_runtime_socket_path())]
@@ -871,7 +873,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             SecretCommand::Get {
                 secret_ref,
                 passphrase,
+                allow_plaintext,
             } => {
+                require_plaintext_export_confirmation(allow_plaintext)?;
                 let passphrase = unlock_passphrase(&vault, passphrase)?;
                 let plaintext = vault.get_secret(&secret_ref, &passphrase)?;
                 print!("{}", String::from_utf8_lossy(&plaintext));
@@ -1543,8 +1547,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 consumer,
                 purpose,
                 delivery_mode,
-                raw_export_requested,
+                allow_plaintext,
             } => {
+                require_plaintext_export_confirmation(allow_plaintext)?;
                 print_broker_response(broker_daemon::request(
                     socket,
                     &json!({
@@ -1553,7 +1558,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "consumer": consumer,
                         "purpose": purpose,
                         "delivery_mode": delivery_mode,
-                        "raw_export_requested": raw_export_requested,
+                        "raw_export_requested": true,
                     }),
                 )?)?;
             }
@@ -1907,11 +1912,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             consumer,
             purpose,
             delivery_mode,
-            raw_export_requested,
+            allow_plaintext,
         } => {
             if !secret_ref.starts_with("secret://") {
                 return Err("resolve requires a secret:// reference".into());
             }
+            require_plaintext_export_confirmation(allow_plaintext)?;
             if broker {
                 let response = broker_daemon::request(
                     socket,
@@ -1921,7 +1927,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "consumer": consumer,
                         "purpose": purpose,
                         "delivery_mode": delivery_mode,
-                        "raw_export_requested": raw_export_requested,
+                        "raw_export_requested": true,
                     }),
                 )?;
                 if !response
@@ -2048,6 +2054,16 @@ fn recovery_secret_or_env(value: Option<String>) -> Result<String, Box<dyn std::
         _ => Err(
             "recovery secret required; pass --recovery-secret or set HBSE_RECOVERY_SECRET".into(),
         ),
+    }
+}
+
+fn require_plaintext_export_confirmation(
+    allow_plaintext: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if allow_plaintext {
+        Ok(())
+    } else {
+        Err("plaintext export requires --allow-plaintext; prefer hbse run, hbse dotenv run, or broker provider-http when possible".into())
     }
 }
 
