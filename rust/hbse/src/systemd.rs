@@ -117,6 +117,8 @@ pub fn render_broker_service(
         write_paths.dedup();
         lines.extend([
             "ProtectHome=read-only".to_string(),
+            "RuntimeDirectory=hbse".to_string(),
+            "RuntimeDirectoryMode=0700".to_string(),
             format!("ReadWritePaths={}", write_paths.join(" ")),
         ]);
     } else {
