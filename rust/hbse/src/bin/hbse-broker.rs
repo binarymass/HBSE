@@ -29,10 +29,14 @@ struct Cli {
     http_credential_header: String,
     #[arg(long, default_value = "Bearer ")]
     http_credential_prefix: String,
-    #[arg(long, default_value_t = 120.0)]
+    #[arg(long, default_value_t = 0.0)]
     http_timeout_seconds: f64,
     #[arg(long, default_value_t = 10 * 1024 * 1024)]
     http_max_response_bytes: u64,
+    #[arg(long, default_value_t = 1024 * 1024)]
+    http_max_request_body_bytes: u64,
+    #[arg(long, default_value_t = false)]
+    http_allow_remote: bool,
 }
 
 fn main() {
@@ -58,6 +62,8 @@ fn main() {
                 credential_prefix: cli.http_credential_prefix,
                 timeout_seconds: cli.http_timeout_seconds,
                 max_response_bytes: cli.http_max_response_bytes,
+                max_request_body_bytes: cli.http_max_request_body_bytes,
+                allow_remote: cli.http_allow_remote,
             })
         }
         None => None,
