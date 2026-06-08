@@ -2,20 +2,17 @@
 set -euo pipefail
 
 version="${1:-0.1.0}"
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-rust_dir="$root/rust"
-bundle_dir="$rust_dir/target/hbse-${version}-native-linux"
-archive="$rust_dir/target/hbse-${version}-native-linux.tar.gz"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bundle_dir="$root/target/hbse-${version}-native-linux"
+archive="$root/target/hbse-${version}-native-linux.tar.gz"
 
-cargo build --manifest-path "$rust_dir/Cargo.toml" --release --quiet
+cargo build --manifest-path "$root/Cargo.toml" --release --quiet
 
 rm -rf "$bundle_dir"
-mkdir -p "$bundle_dir/bin" "$bundle_dir/packaging/systemd"
+mkdir -p "$bundle_dir/bin"
 
-install -m 0755 "$rust_dir/target/release/hbse" "$bundle_dir/bin/hbse"
-install -m 0755 "$rust_dir/target/release/hbse-broker" "$bundle_dir/bin/hbse-broker"
-install -m 0644 "$root/packaging/systemd/hbse-broker.service" "$bundle_dir/packaging/systemd/hbse-broker.service"
-install -m 0644 "$root/packaging/systemd/hbse-broker.socket" "$bundle_dir/packaging/systemd/hbse-broker.socket"
+install -m 0755 "$root/target/release/hbse" "$bundle_dir/bin/hbse"
+install -m 0755 "$root/target/release/hbse-broker" "$bundle_dir/bin/hbse-broker"
 
 cat > "$bundle_dir/README.md" <<EOF
 # HBSE Native Linux Bundle
@@ -24,7 +21,6 @@ This bundle contains:
 
 - \`bin/hbse\`
 - \`bin/hbse-broker\`
-- systemd service/socket templates
 
 Quick smoke:
 
@@ -37,13 +33,13 @@ hbse-broker --help
 Install the binaries into a directory on PATH, then use:
 
 \`\`\`bash
-hbse broker install-service --scope user --enable --start
+hbse --vault "\$HOME/.local/share/hbse/vault.db" broker install-service --scope user --enable --start
 \`\`\`
 EOF
 
 (
   cd "$bundle_dir"
-  sha256sum bin/hbse bin/hbse-broker packaging/systemd/hbse-broker.service packaging/systemd/hbse-broker.socket > SHA256SUMS
+  sha256sum bin/hbse bin/hbse-broker > SHA256SUMS
 )
 
 tar -C "$(dirname "$bundle_dir")" -czf "$archive" "$(basename "$bundle_dir")"

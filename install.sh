@@ -6,7 +6,7 @@ usage() {
 Install HBSE native Rust binaries.
 
 Usage:
-  rust/install.sh [options]
+  ./install.sh [options]
 
 Options:
   --prefix <path>                 Install prefix. Default: $HOME/.local
@@ -22,14 +22,13 @@ Options:
   -h, --help                      Show this help.
 
 Examples:
-  rust/install.sh
-  rust/install.sh --service user --enable-service --start-service
-  sudo rust/install.sh --prefix /usr/local --service system --service-user hbse --enable-service
+  ./install.sh
+  ./install.sh --service user --enable-service --start-service
+  sudo ./install.sh --prefix /usr/local --service system --service-user hbse --enable-service
 USAGE
 }
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 prefix="${HBSE_INSTALL_PREFIX:-$HOME/.local}"
 build=1
 service="none"
@@ -100,12 +99,12 @@ esac
 
 bin_dir="$prefix/bin"
 if [[ "$build" -eq 1 ]]; then
-  cargo build --manifest-path "$repo_root/rust/Cargo.toml" --release
+  cargo build --manifest-path "$repo_root/Cargo.toml" --release
 fi
 
 install -d "$bin_dir"
-install -m 0755 "$repo_root/rust/target/release/hbse" "$bin_dir/hbse"
-install -m 0755 "$repo_root/rust/target/release/hbse-broker" "$bin_dir/hbse-broker"
+install -m 0755 "$repo_root/target/release/hbse" "$bin_dir/hbse"
+install -m 0755 "$repo_root/target/release/hbse-broker" "$bin_dir/hbse-broker"
 
 "$bin_dir/hbse" --help >/dev/null
 "$bin_dir/hbse-broker" --help >/dev/null
@@ -118,7 +117,6 @@ if [[ "$service" != "none" ]]; then
   service_args=(
     --scope "$service"
     --broker-executable "$bin_dir/hbse-broker"
-    --vault "$vault_path"
     --idle-timeout-seconds "$idle_timeout_seconds"
   )
   if [[ -n "$socket_path" ]]; then
@@ -134,7 +132,7 @@ if [[ "$service" != "none" ]]; then
     service_args+=(--start)
   fi
 
-  "$bin_dir/hbse" broker install-service "${service_args[@]}"
+  "$bin_dir/hbse" --vault "$vault_path" broker install-service "${service_args[@]}"
 fi
 
 if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
